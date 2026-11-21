@@ -56,7 +56,7 @@ class BrandingTests(unittest.TestCase):
     def test_pattern(self):
         for s in ('1360uefi Boot Manager', 'v1.0-beta  |  PS5 native UEFI', 'Native UEFI Payload - PS5'):
             self.assertTrue(BAD.search(s), s)
-        for s in ('UEFI Boot Manager', 'PSWloader v1.0', 'AMD Oberon (PS5 Custom GPU)', 'alphabet'):
+        for s in ('UEFI Boot Manager', 'PSWloader v1.0.1', 'AMD Oberon (PS5 Custom GPU)', 'alphabet'):
             self.assertFalse(BAD.search(s), s)
 
 

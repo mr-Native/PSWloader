@@ -969,10 +969,10 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
         source = source.replace(anchor, anchor + '  LvglLib|LvglPkg/Library/LvglLib/LvglLib.inf\n  LvglThemeLib|LvglPkg/Library/LvglThemeLib/LvglThemeLib.inf\n'
                                 '  LvglUiConfigLib|LvglPkg/Library/LvglUiConfigLib/LvglUiConfigLib.inf\n', 1)
         source += ('\n[PcdsFixedAtBuild]\n  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderTitle|"UEFI Boot Manager"\n'
-                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0"\n'
+                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0.1"\n'
                    # r5.24 (user: one visible name): system table FirmwareVendor + version string (UiApp, Windows)
                    '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"PSWloader"\n'
-                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0"\n'
+                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0.1"\n'
                    # r5.7 (menu test 16.11.): safe inner margin (TV/capture overscan cut ~15-20 px on the left)
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameEnabled|TRUE\n'
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameHeightPct|94\n'

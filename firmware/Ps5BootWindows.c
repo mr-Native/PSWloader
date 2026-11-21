@@ -36,7 +36,7 @@ STATIC BOOLEAN mPs5BsTraceWarm;   /* lab: set by Ps5WarmReadRecord on a warm run
 #define PS5_QUIET_SCREEN 1
 #endif
 #define PS5_BRAND_TITLE L"PSWloader"   /* r5.17: product name (user 17.11.2026) */
-#define PS5_BRAND_VERSION L"v1.0"
+#define PS5_BRAND_VERSION L"v1.0.1"
 #define PS5_FW_RELEASE "r5.25.8"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG); bump with every build */
 #if PS5_QUIET_SCREEN
 #define PS5_SCREEN(...) do{CHAR16 Ps5Q_[256];UnicodeSPrint(Ps5Q_,sizeof(Ps5Q_),__VA_ARGS__);DEBUG((DEBUG_INFO,"PS5 screen (quiet): %s",Ps5Q_));}while(0)
