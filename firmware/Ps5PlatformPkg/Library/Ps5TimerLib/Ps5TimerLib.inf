@@ -1,0 +1,18 @@
+## @file
+# PS5 invariant TSC timer. SPDX-License-Identifier: BSD-2-Clause-Patent
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = Ps5TimerLib
+  FILE_GUID = A8A1614B-49F0-4AC4-82E1-157160BE5B56
+  MODULE_TYPE = BASE
+  VERSION_STRING = 1.0
+  LIBRARY_CLASS = TimerLib
+
+[Sources.X64]
+  Ps5TimerLib.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  BaseLib

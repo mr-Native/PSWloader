@@ -1,0 +1,74 @@
+; ps5gbe.inf v1.0.9 - PS5 Gigabit Ethernet (Sony 104D:9104), NDIS 6.20 miniport
+; Signed with the PSWloader Driver Signing certificate (trusted root + trusted publisher required). GPL-2.0-only (see ps5gbe.c).
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Net
+ClassGUID   = {4d36e972-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+CatalogFile = ps5gbe.cat
+DriverVer   = 11/17/2026,1.0.10.1
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = PS5, NTamd64
+
+[PS5.NTamd64]
+%DevDesc% = PS5GBE.ndi, PCI\VEN_104D&DEV_9104
+
+[PS5GBE.ndi.NTamd64]
+Characteristics    = 0x84
+BusType            = 5
+*IfType            = 6
+*MediaType         = 0
+*PhysicalMediaType = 14
+*IfConnectorPresent = 1
+*ConnectionType    = 1
+*DirectionType     = 0
+*AccessType        = 2
+*HardwareLoopback  = 0
+AddReg             = PS5GBE.Reg
+CopyFiles          = PS5GBE.CopyFiles
+
+; v1.0.1: the function has no INTx pin (MSI only); without MSISupported the PnP
+; arbiter fails (code 39, STATUS_CONFLICTING_ADDRESSES) although ps5gbe v1.0 polls
+[PS5GBE.ndi.NTamd64.HW]
+AddReg = PS5GBE.HW.Reg
+
+[PS5GBE.HW.Reg]
+HKR, "Interrupt Management", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 1
+
+[PS5GBE.ndi.NTamd64.Services]
+AddService = ps5gbe, 2, PS5GBE.Service
+
+[PS5GBE.Reg]
+HKR, Ndi,            Service,    0, "ps5gbe"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "ethernet"
+
+[PS5GBE.Service]
+DisplayName   = %DevDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\ps5gbe.sys
+LoadOrderGroup = NDIS
+
+[PS5GBE.CopyFiles]
+ps5gbe.sys
+
+[SourceDisksNames]
+1 = %DiskDesc%
+
+[SourceDisksFiles]
+ps5gbe.sys = 1
+
+[DestinationDirs]
+PS5GBE.CopyFiles = 13
+
+[Strings]
+Mfg      = "PSWloader"
+DevDesc  = "PS5 Gigabit Ethernet (ps5gbe)"
+DiskDesc = "ps5gbe driver"

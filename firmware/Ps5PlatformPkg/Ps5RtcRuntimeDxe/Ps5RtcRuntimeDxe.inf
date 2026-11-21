@@ -1,0 +1,22 @@
+## SPDX-License-Identifier: BSD-2-Clause-Patent
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = Ps5RtcRuntimeDxe
+  FILE_GUID = A6708AD9-0657-41AA-904D-DA1C574B9BA6
+  MODULE_TYPE = DXE_RUNTIME_DRIVER
+  VERSION_STRING = 1.0
+  ENTRY_POINT = Ps5RtcInitialize
+[Sources]
+  Ps5RtcRuntimeDxe.c
+[Packages]
+  MdePkg/MdePkg.dec
+[LibraryClasses]
+  BaseLib
+  SynchronizationLib
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+[Protocols]
+  gEfiRealTimeClockArchProtocolGuid ## PRODUCES
+[Depex]
+  TRUE

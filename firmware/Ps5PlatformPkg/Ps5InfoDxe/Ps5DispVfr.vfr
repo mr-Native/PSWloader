@@ -1,0 +1,19 @@
+// Ps5InfoDxe v1.1 (r5.22): tab "Display" - refresh rate (highest at the native resolution) and the current mode.
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <Uefi/UefiMultiPhase.h>
+#include "../Include/Ps5PowerPreset.h"
+#define PS5_FRONT_PAGE_CLASS {0xe58809f8,0xfbc1,0x48e2,{0x88,0x3a,0xa3,0x0f,0xdc,0x4b,0x44,0x1e}}   // gEfiIfrFrontPageGuid
+#define PS5_DISP_FORMSET_GUID {0x9c1e5f2a,0x1360,0x4e1b,{0xb0,0x5e,0x13,0x60,0x0e,0xf1,0x00,0x10}}
+formset
+  guid = PS5_DISP_FORMSET_GUID, title = STRING_TOKEN(STR_DISP_TITLE), help = STRING_TOKEN(STR_DISP_HELP), classguid = PS5_FRONT_PAGE_CLASS,
+  efivarstore PS5_REFRESH, attribute = 0x00000006, name = Ps5Refresh, guid = PS5_POWER_PRESET_GUID;
+  form formid = 1, title = STRING_TOKEN(STR_DISP_TITLE);
+    subtitle text = STRING_TOKEN(STR_DISP_SUB);
+    oneof varid = Ps5Refresh.Value, questionid = PS5_REFRESH_KEY,
+      prompt = STRING_TOKEN(STR_RFR), help = STRING_TOKEN(STR_RFR_HELP), flags = INTERACTIVE,
+      option text = STRING_TOKEN(STR_RFR_NAT), value = 0, flags = DEFAULT;
+      option text = STRING_TOKEN(STR_RFR_MAX), value = 1, flags = 0;
+    endoneof;
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_DMODE_L), text = STRING_TOKEN(STR_DMODE_V);
+  endform;
+endformset;

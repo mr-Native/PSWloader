@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- autounattend.xml v2.1 (PSWloader v1.0; v2.1: specialize pass runs %WINDIR%\Setup\Scripts\psw-specialize.cmd - certificate,
+     network driver ps5gbe and BypassNRO before the Windows setup screens, so the network page finds a network and a Microsoft
+     account is optional) - prepares Windows Setup on the PS5 in the background, then the normal
+     Windows 11 Setup screens follow (language, disk, edition, ...), as on any PC. No window opens. It only:
+     1-4. sets the official Windows Setup switches LabConfig\Bypass* (TPM, Secure Boot, CPU, RAM), because the PS5 has no
+          TPM 2.0 for Windows and the PSWloader drivers need test mode (Secure Boot off);
+     5.   runs PSW\psw-drivers.cmd from this stick: trusts the public PSWloader certificate and loads the PS5 storage
+          drivers in Windows Setup, so the internal M.2 is listed.
+     specialize: psw-specialize.cmd (copied by sources\$OEM$) trusts the PSWloader certificate, installs the network driver and
+     sets OOBE\BypassNRO.
+     It contains no disk, image, product key, account or password settings. -->
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+          <Description>PSWloader: the console has no TPM 2.0 that Windows Setup can see</Description>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+          <Description>PSWloader: Secure Boot stays off (PSWloader-signed drivers need test mode)</Description>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>reg add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path>
+          <Description>PSWloader: the PS5 CPU is not on the Windows 11 list</Description>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Path>reg add HKLM\SYSTEM\Setup\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
+          <Description>PSWloader: part of the 16 GB is graphics memory</Description>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Path>cmd /c "for %i in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do @if exist %i:\PSW\psw-drivers.cmd call %i:\PSW\psw-drivers.cmd"</Path>
+          <Description>PSWloader: trust the PSWloader certificate and load the PS5 storage drivers, so the internal M.2 is listed</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>cmd /c "%WINDIR%\Setup\Scripts\psw-specialize.cmd"</Path>
+          <Description>PSWloader: certificate, network driver and optional Microsoft account before the Windows setup screens</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+</unattend>

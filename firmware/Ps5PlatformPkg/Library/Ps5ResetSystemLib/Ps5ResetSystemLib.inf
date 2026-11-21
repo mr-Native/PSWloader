@@ -1,0 +1,35 @@
+## SPDX-License-Identifier: BSD-2-Clause-Patent
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = Ps5ResetSystemLib
+  FILE_GUID = 1A6D4562-09E7-4469-A9A0-21B992901C31
+  MODULE_TYPE = DXE_RUNTIME_DRIVER
+  VERSION_STRING = 1.0
+  LIBRARY_CLASS = ResetSystemLib|DXE_RUNTIME_DRIVER
+  CONSTRUCTOR = Ps5ResetConstructor
+[Sources]
+  Ps5ResetSystemLib.c
+  icc-power.c
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  IoLib
+  PciExpressLib
+  SynchronizationLib
+  DebugLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  DxeServicesTableLib
+[Guids]
+  gEfiGlobalVariableGuid
+  gEfiEventVirtualAddressChangeGuid
+  gEfiEventReadyToBootGuid
+  gEfiEventExitBootServicesGuid
+[Protocols]
+  gEfiGraphicsOutputProtocolGuid
+[BuildOptions]
+  GCC:*_*_X64_CC_FLAGS = -DPS5_EDK2

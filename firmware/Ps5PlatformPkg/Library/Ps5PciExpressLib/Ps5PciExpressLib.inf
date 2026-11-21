@@ -1,0 +1,20 @@
+## SPDX-License-Identifier: BSD-2-Clause-Patent
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = Ps5PciExpressLib
+  FILE_GUID = 2F484C89-3019-42DB-81F5-156F2407D081
+  MODULE_TYPE = BASE
+  VERSION_STRING = 1.0
+  LIBRARY_CLASS = PciExpressLib
+[Sources]
+  Ps5PciExpressLib.c
+  pci-transport.c
+[Packages]
+  MdePkg/MdePkg.dec
+[LibraryClasses]
+  BaseLib
+  DebugLib
+  IoLib
+  SynchronizationLib
+[BuildOptions]
+  GCC:*_*_X64_CC_FLAGS = -DPS5_EDK2

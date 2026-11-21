@@ -1,0 +1,295 @@
+--- a/include/utils.h	2026-10-31 16:31:19.000000000 +0100
++++ b/include/utils.h	2026-11-22 00:13:08.152995325 +0100
+@@ -150,6 +150,7 @@
+ int pin_to_first_available_core(void);
+ void unpin(void);
+ void notify(const char *fmt, ...);
++void notify_banner(const char *msg);
+ void notify_internal(uint8_t *msg);
+ void enter_rest_mode(void);
+ 
+--- a/source/loader.c	2026-10-31 16:31:19.000000000 +0100
++++ b/source/loader.c	2026-11-22 00:13:53.029319010 +0100
+@@ -11,51 +11,24 @@
+ #include <sys/stat.h>
+ 
+ const char *file_paths[] = {
+-    "/mnt/usb0/",           "/mnt/usb1/",           "/mnt/usb2/",
+-    "/mnt/usb3/",           "/mnt/usb0/PS5/Linux/", "/mnt/usb1/PS5/Linux/",
+-    "/mnt/usb2/PS5/Linux/", "/mnt/usb3/PS5/Linux/",
++    /* PSWloader v1.0.2: internal storage first, then USB; the older layouts follow so existing installs still start */
++    "/data/pswloader/",
++    "/mnt/usb0/PSW/",
++    "/mnt/usb1/PSW/",
++    "/mnt/usb2/PSW/",
++    "/mnt/usb3/PSW/",
++    "/data/1360uefi/",
++    "/mnt/usb0/PS5/Windows11/native-test/",
++    "/mnt/usb1/PS5/Windows11/native-test/",
++    "/mnt/usb2/PS5/Windows11/native-test/",
++    "/mnt/usb3/PS5/Windows11/native-test/"
+ };
+ 
+ long find_and_get_size_of_file(const char *filename, char *found_path);
+ int find_and_read_file(const char *filename, void *buf, size_t bufsize);
+ 
++/* PSWloader never reads the global path-override.txt. */
+ static const char *get_overridden_filename(const char *filename) {
+-  static int state = 0;
+-  static char *overrides_start = nullptr;
+-  static char *overrides_end = nullptr;
+-
+-  if (state == 0) {
+-    state = 1;
+-    char found_path[256];
+-    ssize_t size = find_and_get_size_of_file("path-override.txt", found_path);
+-    if (size > 0) {
+-      overrides_start = malloc(size + 1);
+-      overrides_end = overrides_start + size + 1;
+-      if (read_file(found_path, overrides_start, size) == size) {
+-        state = 2;
+-        for (char *p = overrides_start; p < overrides_end; p++)
+-          if (*p == '\n')
+-            *p = 0;
+-        // make sure the last string is null-terminated
+-        overrides_start[size] = 0;
+-      }
+-    }
+-  }
+-
+-  // overrides not found, or unreadable, or currently looking for it
+-  if (state == 1)
+-    return filename;
+-
+-  size_t needle_len = strlen(filename);
+-  for (const char *p = overrides_start; p < overrides_end;) {
+-    size_t haystack_len = strlen(p);
+-    if (haystack_len > needle_len && !strncmp(p, filename, needle_len) &&
+-        p[needle_len] == '=')
+-      return p + needle_len + 1;
+-    p += haystack_len + 1;
+-  }
+-
+-  // haven't found an override, return original filename
+   return filename;
+ }
+ 
+@@ -99,12 +72,18 @@
+ }
+ 
+ int read_file(const char *path, void *buf, size_t bufsize) {
++  if (bufsize > 16 * 1024 * 1024) return -1;
+   int fd = open(path, O_RDONLY);
+-  if (fd < 0)
+-    return fd;
+-  int r = read(fd, buf, bufsize);
++  if (fd < 0) return -1;
++  size_t done = 0;
++  while (done < bufsize) {
++    ssize_t got = read(fd, (char *)buf + done, bufsize - done);
++    if (got < 0) { close(fd); return -1; }
++    if (got == 0) break;
++    done += (size_t)got;
++  }
+   close(fd);
+-  return r;
++  return (int)done;
+ }
+ 
+ void trim_newline(char *s) {
+@@ -117,56 +96,78 @@
+   }
+ }
+ 
++__asm__(
++  ".section .rodata\n"
++  ".balign 16\n"
++  ".global _psw_kernel_start\n"
++  "_psw_kernel_start:\n"
++  ".incbin \"pswloader-kernel.bin\"\n"
++  ".global _psw_kernel_end\n"
++  "_psw_kernel_end:\n"
++  ".balign 16\n"
++  ".global _psw_upl_start\n"
++  "_psw_upl_start:\n"
++  ".incbin \"pswloader-upl.bin\"\n"
++  ".global _psw_upl_end\n"
++  "_psw_upl_end:\n"
++  ".previous\n"
++);
++extern const unsigned char _psw_kernel_start[], _psw_kernel_end[];
++extern const unsigned char _psw_upl_start[], _psw_upl_end[];
++
+ int fetch_linux(struct linux_info *info) {
+   char bzimage_path[256];
+   char initrd_path[256];
+ 
+-  size_t bzimage_size = find_and_get_size_of_file("bzImage", bzimage_path);
+-  if (bzimage_size < 0) {
+-    notify("File bzImage not found at default paths - Aborting\n");
+-    return -1;
+-  }
+-
+-  void *bzimage =
+-      mmap(NULL, ALIGN_UP(bzimage_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
+-           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+-  if (bzimage == MAP_FAILED) {
+-    notify("[-] Error could not allocate bzimage.\n");
+-    return -1;
+-  }
+-
+-  bzimage_size =
+-      read_file(bzimage_path, bzimage, ALIGN_UP(bzimage_size, PAGE_SIZE));
+-  if (bzimage_size < 0) {
+-    notify("Something went wrong while reading bzImage - Aborting\n");
+-    return -1;
+-  }
+-
+-  size_t initrd_size = find_and_get_size_of_file("initrd.img", initrd_path);
+-  if (bzimage_size < 0) {
+-    notify("File bzImage not found at default paths - Aborting\n");
+-    return -1;
+-  }
+-
+-  void *initrd =
+-      mmap(NULL, ALIGN_UP(initrd_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
+-           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+-  if (initrd == MAP_FAILED) {
+-    notify("[-] Error could not allocate initrd.\n");
+-    return -1;
+-  }
+-
+-  initrd_size =
+-      read_file(initrd_path, initrd, ALIGN_UP(initrd_size, PAGE_SIZE));
+-  if (initrd_size < 0) {
+-    notify("Something went wrong while reading initrd - Aborting\n");
++  /* v1.0.4: external files in /data/pswloader/ or USB PSW/ override if present; otherwise use embedded firmware so
++   * PSWloader.elf always starts standalone (even with an NTFS-only USB stick or no USB stick at all). */
++  long bzimage_length = find_and_get_size_of_file("pswloader-kernel.bin", bzimage_path);
++  if (bzimage_length < 0) bzimage_length = find_and_get_size_of_file("bzImage.ps5-uefi", bzimage_path);
++  long initrd_length = find_and_get_size_of_file("pswloader-upl.bin", initrd_path);
++  if (initrd_length < 0) initrd_length = find_and_get_size_of_file("ps5-upl.bin", initrd_path);
++
++  int use_emb_kernel = (bzimage_length < 0);
++  int use_emb_upl = (initrd_length < 0);
++  if (use_emb_kernel) bzimage_length = (long)(_psw_kernel_end - _psw_kernel_start);
++  if (use_emb_upl) initrd_length = (long)(_psw_upl_end - _psw_upl_start);
++
++  if (bzimage_length < 2048 + 512 || bzimage_length > 16 * 1024 * 1024 ||
++      initrd_length < 4096 || initrd_length > 16 * 1024 * 1024) {
++    notify("PSWloader: firmware files missing or invalid; aborting\n");
++    return -1;
++  }
++  size_t bzimage_size = (size_t)bzimage_length;
++  size_t initrd_size = (size_t)initrd_length;
++  void *bzimage = mmap(NULL, ALIGN_UP(bzimage_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
++                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++  if (bzimage == MAP_FAILED) return -1;
++  void *initrd = mmap(NULL, ALIGN_UP(initrd_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
++                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++  if (initrd == MAP_FAILED) return -1;
++  if (use_emb_kernel) {
++    memcpy(bzimage, _psw_kernel_start, bzimage_size);
++    printf("PSWloader: using embedded pswloader-kernel.bin (%zu bytes)\n", bzimage_size);
++  } else if (read_file(bzimage_path, bzimage, bzimage_size) != (int)bzimage_size) {
++    notify("PSWloader: firmware files could not be read completely; aborting\n");
++    return -1;
++  }
++  if (use_emb_upl) {
++    memcpy(initrd, _psw_upl_start, initrd_size);
++    printf("PSWloader: using embedded pswloader-upl.bin (%zu bytes)\n", initrd_size);
++  } else if (read_file(initrd_path, initrd, initrd_size) != (int)initrd_size) {
++    notify("PSWloader: firmware files could not be read completely; aborting\n");
++    return -1;
++  }
++  const unsigned char *header = bzimage;
++  unsigned body = (unsigned)header[0x1f4] | ((unsigned)header[0x1f5] << 8) |
++                  ((unsigned)header[0x1f6] << 16) | ((unsigned)header[0x1f7] << 24);
++  if (header[0x1f1] != 3 || memcmp(header + 0x202, "HdrS", 4) ||
++      body != (bzimage_size - 2048) / 16 || (bzimage_size - 2048) % 16 ||
++      memcmp(initrd, "PS5UPL01", 8)) {
++    notify("PSWloader: firmware file has an unexpected format; aborting\n");
+     return -1;
+   }
+-
+-  if (dump_device_firmwares(initrd_path) < 0) {
+-    notify(
+-        "Something went wrong while dumping device firmwares - Continuing\n");
+-  }
++  /* No dump_device_firmwares: the firmware files are inputs, not Linux firmware output. */
+ 
+   size_t vram_size;
+   char buf_vram[16] = {};
+--- a/source/main.c	2026-10-31 16:31:19.000000000 +0100
++++ b/source/main.c	2026-11-22 00:13:50.577301361 +0100
+@@ -13,7 +13,7 @@
+ // files are staged, so it must not exit after that.
+ static int fail_after_staging(void) {
+   if (PS5_FW_IS_11XX(fw)) {
+-    notify("Linux files are still staged. Cold reboot before trying again.\n");
++    notify("PSWloader: firmware is still staged. Cold reboot before trying again.\n");
+     while (1)
+       sleep(30);
+   }
+@@ -21,14 +21,17 @@
+ }
+ 
+ int main(void) {
++  /* PSWloader v1.0 (17.11.2026, user request): name and version first */
++  notify_banner("Welcome to PSWloader!\nv1.0\n");
++
+   if (setup_env()) {
+-    notify("Something went wrong while initiating.\nPlease make sure your fw "
+-           "is supported.");
++    notify("PSWloader: initialization failed.\nPlease make sure your firmware "
++           "is supported and kstuff/etaHEN is not running.\n");
+     return -1;
+   }
+ 
+   if (fetch_linux(&linux_i)) {
+-    notify("Something went wrong while installing linux files.\n");
++    notify("PSWloader: failed to stage firmware files.\n");
+     return -1;
+   }
+ 
+@@ -59,11 +62,12 @@
+     goto err;
+   }
+ 
+-  notify("Finished preparation. Going to rest mode in 5 seconds.\nPlease wait "
+-         "for the orange light to stop "
+-         "blinking and then wakeup to Linux :)\n");
++  /* PSWloader v1.0.3 (18.11.2026, user): the messages stay separate as before; GameOS shows them one after the other,
++   * so the last one was still on screen when the 5 s were over - the wait is 7 s now (announced as such). */
++  notify_banner("Starting UEFI Boot Manager in 7 seconds...\n");
++  notify_banner("When the orange light stays on, wake the console from rest mode.\n");
+ 
+-  sleep(5);
++  sleep(7);
+   enter_rest_mode();
+ 
+   while (1) {
+--- a/source/utils.c	2026-10-31 16:31:19.000000000 +0100
++++ b/source/utils.c	2026-11-22 00:13:08.156995353 +0100
+@@ -364,10 +364,20 @@
+   vsnprintf(buffer, sizeof(buffer), fmt, args);
+   va_end(args);
+ 
+-  notify_internal((uint8_t *)buffer);
++  /* PSWloader: only failures pop up; progress/diagnostics go to the log only (user request 15.11.2026). */
++  if (strstr(buffer, "wrong") || strstr(buffer, "Abort") || strstr(buffer, "failed") || strstr(buffer, "refused") ||
++      strstr(buffer, "not found") || strstr(buffer, "Cold reboot") || strstr(buffer, "Error") || strstr(buffer, "error") ||
++      strstr(buffer, "Only the retail") || strstr(buffer, "Could not"))
++    notify_internal((uint8_t *)buffer);
+   printf("%s", buffer);
+ }
+ 
++/* The one message the user sees on the normal path. */
++void notify_banner(const char *msg) {
++  notify_internal((uint8_t *)msg);
++  printf("%s", msg);
++}
++
+ void notify_internal(uint8_t *msg) {
+   struct {
+     char pad[45];

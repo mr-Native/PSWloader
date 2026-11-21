@@ -1,0 +1,14 @@
+// Ps5InfoDxe v0.5 (r5.7): tab "Exit" - save & boot (boot-now; settings are saved by the BDS before bootmgr), restart, power off.
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <Uefi/UefiMultiPhase.h>
+#include "../Include/Ps5PowerPreset.h"
+#define PS5_FRONT_PAGE_CLASS {0xe58809f8,0xfbc1,0x48e2,{0x88,0x3a,0xa3,0x0f,0xdc,0x4b,0x44,0x1e}}   // gEfiIfrFrontPageGuid
+#define PS5_EXIT_FORMSET_GUID {0x9c1e5f2a,0x1360,0x4e1b,{0xb0,0x5e,0x13,0x60,0x0e,0xf1,0x00,0x0c}}
+formset
+  guid = PS5_EXIT_FORMSET_GUID, title = STRING_TOKEN(STR_EXIT_TITLE), help = STRING_TOKEN(STR_EXIT_HELP), classguid = PS5_FRONT_PAGE_CLASS,
+  form formid = 1, title = STRING_TOKEN(STR_EXIT_TITLE);
+    text help = STRING_TOKEN(STR_SAVE_BOOT_HELP), text = STRING_TOKEN(STR_SAVE_BOOT), flags = INTERACTIVE, key = 0x1361;
+    text help = STRING_TOKEN(STR_RST_HELP), text = STRING_TOKEN(STR_RST), flags = INTERACTIVE, key = 0x1362;
+    text help = STRING_TOKEN(STR_OFF_HELP), text = STRING_TOKEN(STR_OFF), flags = INTERACTIVE, key = 0x1363;
+  endform;
+endformset;

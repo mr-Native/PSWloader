@@ -1,0 +1,66 @@
+// Ps5InfoDxe v1.3 (r5.25.1): Start-up > Advanced: power-cycle USB drives at start (default on).
+// v1.2 (r5.22): tab "Boot" - boot order list on top (arranged with Enter + arrows or the up/down buttons),
+//   start-up (fast boot), boot now and "Boot once from ..." (EDK2 Boot Manager, only reachable from here).
+//   The old internal/USB choice stays hidden for the migration. v1.0 (r5.21): list. v0.8 (r5.18): boot order, fast boot.
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <Uefi/UefiMultiPhase.h>
+#include "../Include/Ps5PowerPreset.h"
+#define PS5_FRONT_PAGE_CLASS {0xe58809f8,0xfbc1,0x48e2,{0x88,0x3a,0xa3,0x0f,0xdc,0x4b,0x44,0x1e}}   // gEfiIfrFrontPageGuid
+#define PS5_BOOT_FORMSET_GUID {0x9c1e5f2a,0x1360,0x4e1b,{0xb0,0x5e,0x13,0x60,0x0e,0xf1,0x00,0x03}}
+#define PS5_BOOT_MANAGER_FORMSET_GUID {0x847bc3fe,0xb974,0x446d,{0x94,0x49,0x5a,0xd5,0x41,0x2e,0x99,0x3b}}   // EDK2 BootManagerUiLib
+formset
+  guid = PS5_BOOT_FORMSET_GUID, title = STRING_TOKEN(STR_BOOT_TITLE), help = STRING_TOKEN(STR_BOOT_HELP), classguid = PS5_FRONT_PAGE_CLASS,
+  efivarstore PS5_FASTBOOT, attribute = 0x00000006, name = Ps5FastBoot, guid = PS5_POWER_PRESET_GUID;
+  efivarstore PS5_BOOTORDER, attribute = 0x00000006, name = Ps5BootOrder, guid = PS5_POWER_PRESET_GUID;
+  efivarstore PS5_BOOT_LIST, attribute = 0x00000006, name = Ps5BootListSel, guid = PS5_POWER_PRESET_GUID;
+  efivarstore PS5_USBCYCLE, attribute = 0x00000006, name = Ps5UsbCycle, guid = PS5_POWER_PRESET_GUID;
+  form formid = 1, title = STRING_TOKEN(STR_BOOT_TITLE);
+    subtitle text = STRING_TOKEN(STR_BLIST_SUB);
+    orderedlist varid = Ps5BootListSel.Order, questionid = PS5_BOOTLIST_KEY,
+      prompt = STRING_TOKEN(STR_BLIST), help = STRING_TOKEN(STR_BLIST_HELP), flags = INTERACTIVE,
+      option text = STRING_TOKEN(STR_BDEV1), value = 1, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV2), value = 2, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV3), value = 3, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV4), value = 4, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV5), value = 5, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV6), value = 6, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV7), value = 7, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV8), value = 8, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV9), value = 9, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV10), value = 10, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV11), value = 11, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV12), value = 12, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV13), value = 13, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV14), value = 14, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV15), value = 15, flags = 0;
+      option text = STRING_TOKEN(STR_BDEV16), value = 16, flags = 0;
+    endlist;
+    suppressif TRUE;
+    oneof varid = Ps5BootOrder.Value, questionid = PS5_BOOTORDER_KEY,
+      prompt = STRING_TOKEN(STR_BORD), help = STRING_TOKEN(STR_BORD_HELP), flags = INTERACTIVE,
+      option text = STRING_TOKEN(STR_BORD_INT), value = 0, flags = DEFAULT;
+      option text = STRING_TOKEN(STR_BORD_USB), value = 1, flags = 0;
+    endoneof;
+    endif;
+    subtitle text = STRING_TOKEN(STR_NULL);
+    subtitle text = STRING_TOKEN(STR_BEH_SUB);
+    oneof varid = Ps5FastBoot.Value, questionid = PS5_FAST_KEY,
+      prompt = STRING_TOKEN(STR_FAST), help = STRING_TOKEN(STR_FAST_HELP), flags = INTERACTIVE,
+      option text = STRING_TOKEN(STR_FAST_OFF), value = 0, flags = DEFAULT;
+      option text = STRING_TOKEN(STR_FAST_ON), value = 1, flags = 0;
+    endoneof;
+    goto 2, prompt = STRING_TOKEN(STR_ADV_GOTO), help = STRING_TOKEN(STR_ADV_GOTO_HELP);
+    subtitle text = STRING_TOKEN(STR_NULL);
+    subtitle text = STRING_TOKEN(STR_NOW_SUB);
+    text help = STRING_TOKEN(STR_WIN_HELP), text = STRING_TOKEN(STR_WIN), flags = INTERACTIVE, key = 0x1361;
+    goto formsetguid = PS5_BOOT_MANAGER_FORMSET_GUID, formid = 0x1000, question = 0x1,
+      prompt = STRING_TOKEN(STR_ONCE), help = STRING_TOKEN(STR_ONCE_HELP);
+  endform;
+  form formid = 2, title = STRING_TOKEN(STR_BOOT_ADV_TITLE);
+    oneof varid = Ps5UsbCycle.Value, questionid = PS5_USBCYCLE_KEY,
+      prompt = STRING_TOKEN(STR_UCYC), help = STRING_TOKEN(STR_UCYC_HELP), flags = INTERACTIVE,
+      option text = STRING_TOKEN(STR_FAST_ON), value = 1, flags = DEFAULT;
+      option text = STRING_TOKEN(STR_FAST_OFF), value = 0, flags = 0;
+    endoneof;
+  endform;
+endformset;

@@ -1,0 +1,70 @@
+; ps5nvmsi.inf v1.0 - extension INF for Windows Setup/WinPE and the installed system.
+; Lower filter under stornvme on the internal SanDisk NVMe of the PS5 (MSI via the Sony proxy), the MSI limit
+; and the boot-start service with the proven Parameters (nvme-hive-edit.py v1.2). No class key, no HKLM writes.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Extension
+ClassGuid   = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+ExtensionId = {12ea1901-7342-487c-bbca-f4744b82d03a}
+Provider    = %Provider%
+DriverVer   = 11/21/2026,0.8.8.0
+CatalogFile = ps5nvmsi.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+ps5nvmsi.sys = 1
+
+[Manufacturer]
+%Provider% = Models, NTamd64.10.0...19041
+
+[Models.NTamd64.10.0...19041]
+%Desc% = Install, PCI\CC_010802
+
+[Install.NT]
+CopyFiles = Files
+
+[Files]
+ps5nvmsi.sys
+
+[Install.NT.HW]
+AddReg = MsiReg
+
+[MsiReg]
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", "MSISupported",      0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", "MessageNumberLimit", 0x00010001, 1
+
+[Install.NT.Filters]
+AddFilter = ps5nvmsi,, FilterLower
+
+[FilterLower]
+FilterPosition = Lower
+
+[Install.NT.Services]
+AddService = ps5nvmsi,, Service
+
+[Service]
+DisplayName    = %Desc%
+ServiceType    = 1
+StartType      = 0
+ErrorControl   = 1
+LoadOrderGroup = "SCSI miniport"
+ServiceBinary  = %13%\ps5nvmsi.sys
+AddReg         = ServiceReg
+
+[ServiceReg]
+HKR, Parameters, "InstalledBy",            0x00000000, "ps5nvmsi.inf"
+HKR, Parameters, "MsiAddrTemplate",        0x00010001, 0xFEE0000C
+HKR, Parameters, "MsiDataTemplate",        0x00010001, 0x4900
+HKR, Parameters, "MsiDestKind",            0x00010001, 2
+HKR, Parameters, "OrigLowerFiltersPresent",0x00010001, 0
+
+[Strings]
+Provider = "PSWloader"
+Disk     = "PS5 storage drivers"
+Desc     = "PS5 NVMe MSI proxy filter (ps5nvmsi)"

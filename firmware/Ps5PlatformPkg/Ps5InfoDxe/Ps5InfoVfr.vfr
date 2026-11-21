@@ -1,0 +1,41 @@
+// Ps5InfoDxe v1.1 (r5.22, PROPOSAL uefi-gui): tab "Overview" - system, display, menu language; technical values under
+//   "Advanced" (form 2). Language moved here from the former Language tab.
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <Uefi/UefiMultiPhase.h>
+#include "../Include/Ps5PowerPreset.h"
+#define PS5_FRONT_PAGE_CLASS {0xe58809f8,0xfbc1,0x48e2,{0x88,0x3a,0xa3,0x0f,0xdc,0x4b,0x44,0x1e}}   // gEfiIfrFrontPageGuid
+#define PS5_INFO_FORMSET_GUID {0x9c1e5f2a,0x1360,0x4e1b,{0xb0,0x5e,0x13,0x60,0x0e,0xf1,0x00,0x01}}
+formset
+  guid = PS5_INFO_FORMSET_GUID, title = STRING_TOKEN(STR_FORMSET_TITLE), help = STRING_TOKEN(STR_FORMSET_HELP), classguid = PS5_FRONT_PAGE_CLASS,
+  efivarstore PS5_LANG, attribute = 0x00000006, name = Ps5Lang, guid = PS5_POWER_PRESET_GUID;
+  form formid = 1, title = STRING_TOKEN(STR_FORM_TITLE);
+    subtitle text = STRING_TOKEN(STR_SUB_SYSTEM);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_FW_L), text = STRING_TOKEN(STR_FW_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_CPU_L), text = STRING_TOKEN(STR_CPU_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_GPU_L), text = STRING_TOKEN(STR_GPU_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_RAM_L), text = STRING_TOKEN(STR_RAM_V);
+    subtitle text = STRING_TOKEN(STR_NULL);
+    subtitle text = STRING_TOKEN(STR_SUB_DISPLAY);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_MON_L), text = STRING_TOKEN(STR_MON_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_MODE_L), text = STRING_TOKEN(STR_MODE_V);
+    subtitle text = STRING_TOKEN(STR_NULL);
+    subtitle text = STRING_TOKEN(STR_SUB_LANG);
+    oneof varid = Ps5Lang.Lang, questionid = PS5_LANG_KEY,
+      prompt = STRING_TOKEN(STR_LANG), help = STRING_TOKEN(STR_LANG_HELP), flags = INTERACTIVE,
+      option text = STRING_TOKEN(STR_LANG_EN), value = 0, flags = DEFAULT;
+      option text = STRING_TOKEN(STR_LANG_DE), value = 1, flags = 0;
+    endoneof;
+    subtitle text = STRING_TOKEN(STR_NULL);
+    goto 2, prompt = STRING_TOKEN(STR_ADV_GOTO), help = STRING_TOKEN(STR_ADV_GOTO_HELP);
+  endform;
+  form formid = 2, title = STRING_TOKEN(STR_INFO_ADV_TITLE);
+    subtitle text = STRING_TOKEN(STR_ADV_SUB);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_REV_L), text = STRING_TOKEN(STR_REV_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_UEFI_L), text = STRING_TOKEN(STR_UEFI_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_GOP_L), text = STRING_TOKEN(STR_GOP_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_PCLK_L), text = STRING_TOKEN(STR_PCLK_V);
+    text help = STRING_TOKEN(STR_NULL), text = STRING_TOKEN(STR_EDID_L), text = STRING_TOKEN(STR_EDID_V);
+    subtitle text = STRING_TOKEN(STR_NULL);
+    text help = STRING_TOKEN(STR_REFRESH_HELP), text = STRING_TOKEN(STR_REFRESH), flags = INTERACTIVE, key = 0x1360;
+  endform;
+endformset;
