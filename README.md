@@ -40,7 +40,7 @@ Tested on system software 13.60.
 Download the files from the [latest release](../../releases/latest).
 
 1. Write the Windows 11 ISO to the USB drive (using Rufus or another flashing tool).
-2. Extract `pswloader-v1.0.4-USB-Stick.zip` to the root of the USB drive.
+2. Extract `pswloader-v*-USB-Stick.zip` to the root of the USB drive.
 3. Copy `PSWloader.elf` and `PSWloader.elf.json` into a folder of the Payload Manager on the console.
 4. Plug in the Windows USB installer drive and your target drive, then start **PSWloader.elf**. When the orange light stays on, wake the console.
 5. On the PSWloader screen press `DEL` and pick the Windows USB installer drive. *(FAT32 works on the first boot; if your flashing tool formatted the drive as NTFS, Setup enables test-signing in the drive's BCD on the first start — restart once into PSWloader if disks are not listed yet.)*
@@ -60,7 +60,7 @@ and the newest `C:\PSWSetup\logs\setup_psw*.log`.
 
 ## Updating an existing installation
 
-1. Download and extract `pswloader-v1.0.4-Updater.zip`, then run `PSWUpdater-v1.0.4.exe` as Administrator.
+1. Download and extract `pswloader-v*-Updater.zip`, then run `PSWUpdater-v*.exe` as Administrator.
 2. If prompted that `PSWloader.elf` also needs updating, replace `PSWloader.elf` and `PSWloader.elf.json` in your Payload Manager after the reboot.
 3. Confirm the restart prompt when the update completes. Update logs are saved under `C:\PSWSetup\Update\`.
 
