@@ -36,7 +36,7 @@ STATIC BOOLEAN mPs5BsTraceWarm;   /* lab: set by Ps5WarmReadRecord on a warm run
 #define PS5_QUIET_SCREEN 1
 #endif
 #define PS5_BRAND_TITLE L"PSWloader"   /* r5.17: product name (user 17.11.2026) */
-#define PS5_BRAND_VERSION L"v1.0.2"
+#define PS5_BRAND_VERSION L"v1.0.3"
 #define PS5_FW_RELEASE "r5.25.8"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG); bump with every build */
 #if PS5_QUIET_SCREEN
 #define PS5_SCREEN(...) do{CHAR16 Ps5Q_[256];UnicodeSPrint(Ps5Q_,sizeof(Ps5Q_),__VA_ARGS__);DEBUG((DEBUG_INFO,"PS5 screen (quiet): %s",Ps5Q_));}while(0)
@@ -94,6 +94,7 @@ STATIC EFI_GUID mWindowsEsp={0xbd21c511,0x2781,0x4058,{0xb8,0x47,0xf6,0x25,0xa7,
 STATIC CHAR16 mWindowsPath[]=L"\\EFI\\Boot\\bootx64.efi";
 #ifdef PS5_NATIVE_SETUP
 #include "ps5-vbios-export.h"
+#include "ps5-wifi-fw-export.h"
 #endif
 
 STATIC EFI_TEXT_STRING mConsoleOutput;
@@ -1196,13 +1197,16 @@ STATIC EFI_STATUS EFIAPI Ps5DiagProtocolRun(PS5_DIAG_RESULT *Out)
   if(Out==NULL)return EFI_INVALID_PARAMETER;
   ZeroMem(Out,sizeof(*Out));
   Ps5DiagRun(&R);
-  Out->LogStatus=(INT32)Ps5DiagSaveLog(&R,Lang,mPs5DiagFallbackEsp);
+  CHAR8 Where[80];Where[0]='\0';
+  Out->LogStatus=(INT32)Ps5DiagSaveLogEx(&R,Lang,mPs5DiagFallbackEsp,Where,sizeof(Where));
   Out->Pass=R.pass;Out->Warn=R.warn;Out->Fail=R.fail;Out->Skip=R.skip;
   for(UINTN I=0;I<PS5_DIAG_COUNT && I<PS5_DIAG_LINES;I++)
     UnicodeSPrint(Out->Line[I],sizeof(Out->Line[I]),L"%a  %a: %a",ps5_diag_status_word(R.item[I].status),ps5_diag_title((unsigned)I,Lang),R.item[I].detail);
   Out->Lines=PS5_DIAG_COUNT<PS5_DIAG_LINES?PS5_DIAG_COUNT:PS5_DIAG_LINES;
-  UnicodeSPrint(Out->Summary,sizeof(Out->Summary),Lang?L"%u PASS  %u WARN  %u FAIL  %u SKIP - Bericht \\PS5DIAG.LOG %a":L"%u PASS  %u WARN  %u FAIL  %u SKIP - report \\PS5DIAG.LOG %a",
-                R.pass,R.warn,R.fail,R.skip,Out->LogStatus==0?(Lang?"gespeichert":"saved"):(Lang?"nicht gespeichert":"not saved"));
+  if(Out->LogStatus==0 && Where[0]!='\0')
+    UnicodeSPrint(Out->Summary,sizeof(Out->Summary),Lang?L"%u PASS  %u WARN  %u FAIL  %u SKIP - gespeichert: %a":L"%u PASS  %u WARN  %u FAIL  %u SKIP - saved: %a",R.pass,R.warn,R.fail,R.skip,Where);
+  else
+    UnicodeSPrint(Out->Summary,sizeof(Out->Summary),Lang?L"%u PASS  %u WARN  %u FAIL  %u SKIP - nicht gespeichert (bitte FAT32-USB-Stick anstecken)":L"%u PASS  %u WARN  %u FAIL  %u SKIP - please plug in a FAT32 USB drive to save the log",R.pass,R.warn,R.fail,R.skip);
   return EFI_SUCCESS;
 }
 /* r5.20.1 (17.11., HW driver: non-interactive trigger): diag=once in \PS5UEFI.CFG runs the read-only system check
@@ -1755,6 +1759,7 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
       ConsoleSnapshot();
       PS5_TS("vbios-export-begin");
       EFI_STATUS VbiosStatus=Ps5ExportVbios(Selected);
+      (VOID)Ps5ExportWifiFw(Selected);
       PS5_TS("vbios-export-end");
       DEBUG((DEBUG_ERROR,"PS5 native VBIOS export: %r; external ESP copy only\n",VbiosStatus));
       ConsoleSnapshot();

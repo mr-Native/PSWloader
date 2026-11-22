@@ -232,26 +232,90 @@ STATIC VOID Ps5DiagRunEx(struct ps5_diag_report *R,BOOLEAN Once,PS5_DIAG_STEP St
   DEBUG((DEBUG_ERROR,"PS5 diag: %u PASS %u WARN %u FAIL %u SKIP\n",R->pass,R->warn,R->fail,R->skip));
 }
 STATIC VOID Ps5DiagRun(struct ps5_diag_report *R) { Ps5DiagRunEx(R,FALSE,NULL); }
-/* \PS5DIAG.LOG on the config ESP (or Fallback when there is none); returns the write status.
- * v0.7: always English (Lang ignored); the same text goes to the volatile variable Ps5DiagLog first, so the log viewer
- * of the Diagnostics tab works even when no ESP can be written. */
-STATIC EFI_STATUS Ps5DiagSaveLog(CONST struct ps5_diag_report *R,unsigned Lang,EFI_HANDLE Fallback) {
-  STATIC CHAR8 Text[PS5_DIAG_LOG_MAX];EFI_FILE_PROTOCOL *Root,*File=NULL;
+STATIC UINTN Ps5DiagAppendPciInventory(CHAR8 *Buf,UINTN Cap,UINTN Len) {
+  EFI_HANDLE *H=NULL;UINTN N=0,I;
+  if(Len+64>=Cap)return Len;
+  Len+=AsciiSPrint(Buf+Len,Cap-Len,"\r\n[PCI Inventory]\r\n");
+  if(EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiPciIoProtocolGuid,NULL,&N,&H)))return Len;
+  for(I=0;I<N&&Len+64<Cap;I++){
+    EFI_PCI_IO_PROTOCOL *Io=NULL;UINTN Seg=0,Bus=0,Dev=0,Func=0;UINT32 Id=0,RevCls=0,Sub=0;
+    if(EFI_ERROR(gBS->HandleProtocol(H[I],&gEfiPciIoProtocolGuid,(VOID **)&Io)))continue;
+    if(EFI_ERROR(Io->GetLocation(Io,&Seg,&Bus,&Dev,&Func)))continue;
+    if(EFI_ERROR(Io->Pci.Read(Io,EfiPciIoWidthUint32,0x00,1,&Id)))continue;
+    (VOID)Io->Pci.Read(Io,EfiPciIoWidthUint32,0x08,1,&RevCls);
+    (VOID)Io->Pci.Read(Io,EfiPciIoWidthUint32,0x2C,1,&Sub);
+    Len+=AsciiSPrint(Buf+Len,Cap-Len,"  %02x:%02x.%x %04x:%04x sub=%04x:%04x rev=%02x cls=%02x/%02x\r\n",
+      (UINT32)Bus,(UINT32)Dev,(UINT32)Func,(UINT32)(Id&0xFFFFu),(UINT32)(Id>>16),
+      (UINT32)(Sub&0xFFFFu),(UINT32)(Sub>>16),(UINT32)(RevCls&0xFFu),
+      (UINT32)((RevCls>>24)&0xFFu),(UINT32)((RevCls>>16)&0xFFu));
+  }
+  FreePool(H);
+  return Len;
+}
+STATIC EFI_STATUS Ps5DiagWriteInDir(EFI_FILE_PROTOCOL *Root,CONST CHAR8 *Text,UINTN Len) {
+  EFI_FILE_PROTOCOL *D1=NULL,*D2=NULL,*File=NULL;
+  EFI_STATUS S=Root->Open(Root,&D1,L"PSWloader",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,EFI_FILE_DIRECTORY);
+  if(EFI_ERROR(S))return S;
+  S=D1->Open(D1,&D2,L"logs",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,EFI_FILE_DIRECTORY);
+  D1->Close(D1);
+  if(EFI_ERROR(S))return S;
+  Ps5SetDelete(D2,L"PS5DIAG.LOG");
+  S=D2->Open(D2,&File,L"PS5DIAG.LOG",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,0);
+  if(!EFI_ERROR(S)){
+    UINTN W=Len;S=File->Write(File,&W,(VOID *)Text);
+    EFI_STATUS F=File->Flush(File);File->Close(File);
+    if(!EFI_ERROR(S))S=F;
+  }
+  D2->Close(D2);
+  return S;
+}
+/* Save \PSWloader\logs\PS5DIAG.LOG: prefers any writable FAT32 USB drive (even with random data),
+ * falls back to the Windows/config ESP (also writes \PS5DIAG.LOG there for backwards compatibility). */
+STATIC EFI_STATUS Ps5DiagSaveLogEx(CONST struct ps5_diag_report *R,unsigned Lang,EFI_HANDLE Fallback,CHAR8 *SavedWhere,UINTN SavedWhereCap) {
+  STATIC CHAR8 Text[PS5_DIAG_LOG_MAX];EFI_FILE_PROTOCOL *Root=NULL,*File=NULL;
   STATIC EFI_GUID LogGuid=PS5_DIAG_PROTOCOL_GUID;
   CHAR8 Fw[96];
   (VOID)Lang;
-  AsciiSPrint(Fw,sizeof(Fw),"PSWloader v1.0.2 (%a), %s rev %x",PS5_FW_RELEASE,gST->FirmwareVendor?gST->FirmwareVendor:L"?",gST->FirmwareRevision);   /* r5.20.7 */
+  if(SavedWhere&&SavedWhereCap)SavedWhere[0]='\0';
+  AsciiSPrint(Fw,sizeof(Fw),"PSWloader v1.0.3 (%a), %s rev %x",PS5_FW_RELEASE,gST->FirmwareVendor?gST->FirmwareVendor:L"?",gST->FirmwareRevision);   /* r5.20.7 */
   UINTN Len=ps5_diag_format(R,0,Fw,Text,sizeof(Text));
+  Len=Ps5DiagAppendPciInventory(Text,sizeof(Text),Len);
   EFI_STATUS V=gRT->SetVariable(PS5_DIAG_LOG_VARIABLE,&LogGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS,Len,Text);   /* gone at ExitBootServices */
   DEBUG((DEBUG_ERROR,"PS5 diag: verdict %a, Ps5DiagLog %u bytes (%r)\n",ps5_diag_verdict_word(ps5_diag_verdict(R,NULL)),(UINT32)Len,V));
   (VOID)V;
+  /* 1. Try any connected writable FAT32 USB drive first */
+  EFI_HANDLE *H=NULL;UINTN N=0,I;
+  if(!EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleFileSystemProtocolGuid,NULL,&N,&H))){
+    for(I=0;I<N;I++){
+      if(!Ps5HandleBehindUsb(H[I]))continue;
+      Root=Ps5PresetRoot(H[I]);
+      if(!Root)continue;
+      EFI_STATUS Su=Ps5DiagWriteInDir(Root,Text,Len);
+      Root->Close(Root);
+      if(!EFI_ERROR(Su)){
+        if(SavedWhere&&SavedWhereCap)AsciiSPrint(SavedWhere,SavedWhereCap,"USB:\\PSWloader\\logs\\PS5DIAG.LOG");
+        DEBUG((DEBUG_ERROR,"PS5 diag: USB:\\PSWloader\\logs\\PS5DIAG.LOG %u bytes (OK)\n",(UINT32)Len));
+        FreePool(H);
+        return EFI_SUCCESS;
+      }
+    }
+    FreePool(H);
+  }
+  /* 2. Fallback: config ESP / selected boot ESP */
   Root=Ps5PresetRoot(mPs5ConfigEsp?mPs5ConfigEsp:Fallback);
   if(!Root)return EFI_NOT_FOUND;
+  EFI_STATUS S=Ps5DiagWriteInDir(Root,Text,Len);
+  /* Also keep root \PS5DIAG.LOG on ESP for backwards compatibility */
   Ps5SetDelete(Root,L"\\PS5DIAG.LOG");
-  EFI_STATUS S=Root->Open(Root,&File,L"\\PS5DIAG.LOG",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,0);
-  if(!EFI_ERROR(S)){UINTN W=Len;S=File->Write(File,&W,Text);EFI_STATUS F=File->Flush(File);File->Close(File);if(!EFI_ERROR(S))S=F;}
+  if(!EFI_ERROR(Root->Open(Root,&File,L"\\PS5DIAG.LOG",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,0))){
+    UINTN W=Len;(VOID)File->Write(File,&W,Text);(VOID)File->Flush(File);File->Close(File);
+  }
   Root->Close(Root);
-  DEBUG((DEBUG_ERROR,"PS5 diag: \\PS5DIAG.LOG %u bytes (%r)\n",(UINT32)Len,S));
+  if(!EFI_ERROR(S)&&SavedWhere&&SavedWhereCap)AsciiSPrint(SavedWhere,SavedWhereCap,"ESP:\\PSWloader\\logs\\PS5DIAG.LOG");
+  DEBUG((DEBUG_ERROR,"PS5 diag: ESP:\\PSWloader\\logs\\PS5DIAG.LOG %u bytes (%r)\n",(UINT32)Len,S));
   return S;
+}
+STATIC EFI_STATUS Ps5DiagSaveLog(CONST struct ps5_diag_report *R,unsigned Lang,EFI_HANDLE Fallback) {
+  return Ps5DiagSaveLogEx(R,Lang,Fallback,NULL,0);
 }
 #endif

@@ -17,7 +17,7 @@
 -    "/mnt/usb0/",           "/mnt/usb1/",           "/mnt/usb2/",
 -    "/mnt/usb3/",           "/mnt/usb0/PS5/Linux/", "/mnt/usb1/PS5/Linux/",
 -    "/mnt/usb2/PS5/Linux/", "/mnt/usb3/PS5/Linux/",
-+    /* PSWloader v1.0.2: internal storage first, then USB; the older layouts follow so existing installs still start */
++    /* PSWloader v1.0.3: internal storage first, then USB; the older layouts follow so existing installs still start */
 +    "/data/pswloader/",
 +    "/mnt/usb0/PSW/",
 +    "/mnt/usb1/PSW/",
@@ -236,7 +236,7 @@
  
  int main(void) {
 +  /* PSWloader v1.0 (17.11.2026, user request): name and version first */
-+  notify_banner("Welcome to PSWloader!\nv1.0.2\n");
++  notify_banner("Welcome to PSWloader!\nv1.0.3\n");
 +
    if (setup_env()) {
 -    notify("Something went wrong while initiating.\nPlease make sure your fw "

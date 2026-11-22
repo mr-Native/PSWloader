@@ -12,7 +12,7 @@
 #define PS5_DIAG_LINES 24
 #define PS5_DIAG_LINE_CHARS 100
 #define PS5_DIAG_LOG_VARIABLE L"Ps5DiagLog"   /* 18.11.2026 */
-#define PS5_DIAG_LOG_MAX 6144                 /* bytes, worst case (21 items + 21 causes) fits */
+#define PS5_DIAG_LOG_MAX 8192                 /* bytes, diag report + full PCI inventory */
 typedef struct {
   UINT32 Lines, Pass, Warn, Fail, Skip;
   INT32 LogStatus;                                   /* EFI_STATUS of the \PS5DIAG.LOG write, as INT32 (0 = written) */

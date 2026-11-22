@@ -969,10 +969,10 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
         source = source.replace(anchor, anchor + '  LvglLib|LvglPkg/Library/LvglLib/LvglLib.inf\n  LvglThemeLib|LvglPkg/Library/LvglThemeLib/LvglThemeLib.inf\n'
                                 '  LvglUiConfigLib|LvglPkg/Library/LvglUiConfigLib/LvglUiConfigLib.inf\n', 1)
         source += ('\n[PcdsFixedAtBuild]\n  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderTitle|"UEFI Boot Manager"\n'
-                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0.2"\n'
+                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0.3"\n'
                    # r5.24 (user: one visible name): system table FirmwareVendor + version string (UiApp, Windows)
                    '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"PSWloader"\n'
-                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0.2"\n'
+                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0.3"\n'
                    # r5.7 (menu test 16.11.): safe inner margin (TV/capture overscan cut ~15-20 px on the left)
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameEnabled|TRUE\n'
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameHeightPct|94\n'
@@ -1152,7 +1152,7 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
                     nvme_preinit_hash=hashlib.sha256((HERE / 'ps5-nvme-msix-preinit.h').read_bytes()).hexdigest() if args.nvme_preinit else None,
                     m2_overlay_hash=hashlib.sha256((HERE / 'ps5-m2-overlay.h').read_bytes()).hexdigest() if args.m2_overlay else None,
                     boot_path_hashes={name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
-                                      for name in ('Ps5BootWindows.c','ps5-native-gpu-probe.h','dcn201-scanout.c','dcn201-scanout.h','dcn201-memory.c','dcn201-memory.h','ps5-native-framebuffer.h','ps5-gpu-aperture.h','framebuffer-page-map.c','framebuffer-page-map.h','ps5-native-page-map.h','ps5-vbios-export.h','ps5-native-setup.h','ps5-post-wim.h','ps5-extapic.h','ps5_boot_manager.py','ps5_boot_reads.py')},
+                                      for name in ('Ps5BootWindows.c','ps5-native-gpu-probe.h','dcn201-scanout.c','dcn201-scanout.h','dcn201-memory.c','dcn201-memory.h','ps5-native-framebuffer.h','ps5-gpu-aperture.h','framebuffer-page-map.c','framebuffer-page-map.h','ps5-native-page-map.h','ps5-vbios-export.h','ps5-wifi-fw-export.h','ps5-native-setup.h','ps5-post-wim.h','ps5-extapic.h','ps5_boot_manager.py','ps5_boot_reads.py')},
                     source_hashes={str(p.relative_to(HERE)): hashlib.sha256(p.read_bytes()).hexdigest()
                                    for p in (HERE / 'Ps5PlatformPkg').rglob('*') if p.is_file()})
     display_sources = (

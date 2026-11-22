@@ -19,11 +19,11 @@ ACPI tables and a set of Windows drivers.
 - HDMI output
 - All 8 CPU cores / 16 threads with clock control by Windows
 - Install to an internal M.2 SSD or a USB drive
-- Wired Ethernet, USB keyboard and mouse
+- Wired Ethernet, on-board Wi-Fi 6 (2.4 GHz / 5 GHz), USB keyboard and mouse
 - Power button shutdown, fan control by CPU temperature, three power presets
 - Firmware setup (English and German) with boot order, display and power settings and a system check
 
-Not supported (yet): Wi-Fi (USB dongles may work), Bluetooth, audio, changing the resolution from Windows. A restart from Windows returns to
+Not supported (yet): Bluetooth, audio, changing the resolution from Windows. A restart from Windows returns to
 Windows without GameOS.
 
 Tested on system software 13.60.
@@ -40,7 +40,7 @@ Tested on system software 13.60.
 Download the files from the [latest release](../../releases/latest).
 
 1. Write the Windows 11 ISO to the USB drive (using Rufus or another flashing tool).
-2. Extract `pswloader-v1.0.2-USB-Stick.zip` to the root of the USB drive.
+2. Extract `pswloader-v1.0.3-USB-Stick.zip` to the root of the USB drive.
 3. Copy `PSWloader.elf` and `PSWloader.elf.json` into a folder of the Payload Manager on the console.
 4. Plug in the Windows USB installer drive and your target drive, then start **PSWloader.elf**. When the orange light stays on, wake the console.
 5. On the PSWloader screen press `DEL` and pick the Windows USB installer drive. *(FAT32 works on the first boot; if your flashing tool formatted the drive as NTFS, Setup enables test-signing in the drive's BCD on the first start — restart once into PSWloader if disks are not listed yet.)*
@@ -57,6 +57,14 @@ behind GameOS, and writes into the GameOS area are blocked. Back up anything imp
 
 If something goes wrong, open an issue and attach `\PS5DIAG.LOG` (UEFI Bootmanager → Diagnostics → *Run system check*)
 and the newest `C:\PSWSetup\logs\setup_psw*.log`.
+
+## Updating an existing installation
+
+1. Download and extract `pswloader-v1.0.3-Updater.zip`, then run `PSWUpdater-v1.0.3.exe` as Administrator.
+2. If prompted that `PSWloader.elf` also needs updating, replace `PSWloader.elf` and `PSWloader.elf.json` in your Payload Manager after the reboot.
+3. Confirm the restart prompt when the update completes. Update logs are saved under `C:\PSWSetup\Update\`.
+
+See the [Documentation](docs/README.md) for details on automatic update checks (`updater.json`), hardware compatibility notes, and troubleshooting.
 
 ## Support
 
@@ -93,7 +101,7 @@ power draw. Every hardware detail in this repository was measured on the console
 
 ## License
 
-BSD-2-Clause-Patent, see [LICENSE](LICENSE). Exceptions are marked in the files: `drivers/ps5gbe`, `drivers/ps5pwr`
+BSD-2-Clause-Patent, see [LICENSE](LICENSE). Exceptions are marked in the files: `drivers/ps5gbe`, `drivers/ps5pwr`, `drivers/ps5wifi`
 and `firmware/atom-host/kmd-*.h` are GPL-2.0-only, the payload patch is GPL-3.0, and the GPU driver keeps the PolyForm
 Noncommercial license of amdgpu-wddm. Third-party components and their licenses are listed in
 [THIRD-PARTY.md](THIRD-PARTY.md).

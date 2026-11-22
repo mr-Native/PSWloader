@@ -47,7 +47,7 @@ def prepare_windows_boot(root,implementation,setup_menu=False):
     (directory/'PlatformBootManagerLib.inf').write_text(inf)
     (directory/'Ps5BootWindows.c').write_text(('#define PS5_NATIVE_SETUP 1\n' if setup_menu else '')+implementation)
     from pathlib import Path
-    for name in ('ps5-native-gpu-probe.h','dcn201-scanout.c','dcn201-scanout.h','dcn201-memory.c','dcn201-memory.h','ps5-native-framebuffer.h','ps5-gpu-aperture.h','framebuffer-page-map.c','framebuffer-page-map.h','ps5-native-page-map.h','ps5-vbios-export.h'):
+    for name in ('ps5-native-gpu-probe.h','dcn201-scanout.c','dcn201-scanout.h','dcn201-memory.c','dcn201-memory.h','ps5-native-framebuffer.h','ps5-gpu-aperture.h','framebuffer-page-map.c','framebuffer-page-map.h','ps5-native-page-map.h','ps5-vbios-export.h','ps5-wifi-fw-export.h'):
         (directory/name).write_text((Path(__file__).parent/name).read_text())
     (directory/'ps5-native-setup.h').write_text((Path(__file__).parent/'ps5-native-setup.h').read_text())
     (directory/'ps5-boot-screen.h').write_text((Path(__file__).parent/'ps5-boot-screen.h').read_text())   # r5.17 PSWloader screen

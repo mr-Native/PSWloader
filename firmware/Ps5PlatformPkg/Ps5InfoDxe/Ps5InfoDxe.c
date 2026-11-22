@@ -30,7 +30,7 @@
 #include "../Include/Ps5PowerPreset.h"   /* r5.6 */
 
 #ifndef PS5_FIRMWARE_LABEL
-#define PS5_FIRMWARE_LABEL L"PSWloader v1.0.2"   /* r5.22: user-visible name PSWloader; r5.24: revision only under Advanced */
+#define PS5_FIRMWARE_LABEL L"PSWloader v1.0.3"   /* r5.22: user-visible name PSWloader; r5.24: revision only under Advanced */
 #endif
 #ifndef PS5_FIRMWARE_REV
 #define PS5_FIRMWARE_REV L"r5.25.2"
@@ -456,9 +456,12 @@ STATIC EFI_STATUS EFIAPI Callback (CONST EFI_HII_CONFIG_ACCESS_PROTOCOL *This, E
       if (EFI_ERROR (S)) {
         SetH (mDiagHii, STRING_TOKEN (STR_DIAG_SUMMARY), L"System check failed (%r).", S);
       } else {
-        /* v1.2: summary always English (Res.Summary follows the menu language); traffic light + log viewer from Ps5DiagLog */
-        SetH (mDiagHii, STRING_TOKEN (STR_DIAG_SUMMARY), L"%u PASS, %u WARN, %u FAIL, %u SKIP - \\PS5DIAG.LOG %s", Res.Pass, Res.Warn,
-              Res.Fail, Res.Skip, Res.LogStatus == 0 ? L"saved" : L"not saved");
+        if (Res.Summary[0] != L'\0') {
+          SetH (mDiagHii, STRING_TOKEN (STR_DIAG_SUMMARY), L"%s", Res.Summary);
+        } else {
+          SetH (mDiagHii, STRING_TOKEN (STR_DIAG_SUMMARY), L"%u PASS, %u WARN, %u FAIL, %u SKIP - %s", Res.Pass, Res.Warn,
+                Res.Fail, Res.Skip, Res.LogStatus == 0 ? L"saved" : L"please plug in a FAT32 USB drive to save the log");
+        }
         if (!DiagRefreshView ()) {   /* BDS without Ps5DiagLog (older build): show its lines, no verdict */
           SetH (mDiagHii, STRING_TOKEN (STR_DIAG_VERDICT), L"%s", L"Verdict not available (BDS without Ps5DiagLog) - see Show log.");
           DiagViewLines (&Res);

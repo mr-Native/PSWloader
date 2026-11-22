@@ -9,7 +9,8 @@
 #   4. USB selective suspend and USB 3 link power management off (prevents 0x144 on USB SSDs during Setup).
 #   5. Protect PS5 boot storage filters before OOBE Windows Updates: exclude driver updates via Windows Update policy,
 #      clear StartOverride on stornvme/ps5nvmsi/ps5m2flt, and mirror ps5nvmsi + MSI limit 1 onto the internal NVMe instance.
-#   6. Wired network driver ps5gbe with pnputil, at most 120 s; a hanging install (prompt) is ended, Setup goes on.
+#   6. Network drivers ps5gbe (Ethernet) + ps5wifi (Wi-Fi 6) with pnputil, at most 120 s each; a hanging install is ended, Setup goes on.
+#   7. Enable OOBE BypassNRO so users can optionally complete Setup offline (local account) even without network.
 param([string]$Payload = "$env:SystemDrive\PSWSetup\payload")
 $ErrorActionPreference = 'Continue'
 $log = "$env:WINDIR\Setup\Scripts\psw-specialize.log"
@@ -171,18 +172,28 @@ try {
   L "boot storage filter protection done"
 } catch { L ("storage protection error: " + $_.Exception.Message) }
 
-# 6. network driver, never waiting for input
-$inf = Join-Path $Payload 'drivers\ps5gbe\ps5gbe.inf'
-if (-not $trusted) { L "network driver skipped: certificate not trusted (it would ask for confirmation)" }
-elseif (-not (Test-Path -LiteralPath $inf)) { L "network driver skipped: $inf missing" }
+# 6. network drivers (Ethernet + Wi-Fi 6), never waiting for input
+if (-not $trusted) { L "network drivers skipped: certificate not trusted (it would ask for confirmation)" }
 else {
-  $out = Join-Path $env:TEMP 'psw-pnputil.txt'
-  $p = Start-Process pnputil.exe -ArgumentList "/add-driver `"$inf`" /install" -NoNewWindow -PassThru -RedirectStandardOutput $out
-  if ($p.WaitForExit(120000)) { L "pnputil ps5gbe exit $($p.ExitCode): $(((Get-Content $out -ErrorAction SilentlyContinue) | Where-Object { $_.Trim() } | Select-Object -Last 3) -join ' | ')" }
-  else {
-    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-    Get-Process drvinst -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    L "pnputil ps5gbe did not finish in 120 s (waiting for a prompt?) - ended; install the driver from PSW\drivers\installdrivers"
+  foreach ($drv in @('ps5gbe', 'ps5wifi')) {
+    $inf = Join-Path $Payload "drivers\$drv\$drv.inf"
+    if (-not (Test-Path -LiteralPath $inf)) { L "network driver $drv skipped: $inf missing"; continue }
+    $out = Join-Path $env:TEMP "psw-pnputil-$drv.txt"
+    $p = Start-Process pnputil.exe -ArgumentList "/add-driver `"$inf`" /install" -NoNewWindow -PassThru -RedirectStandardOutput $out
+    if ($p.WaitForExit(120000)) { L "pnputil $drv exit $($p.ExitCode): $(((Get-Content $out -ErrorAction SilentlyContinue) | Where-Object { $_.Trim() } | Select-Object -Last 3) -join ' | ')" }
+    else {
+      Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+      Get-Process drvinst -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+      L "pnputil $drv did not finish in 120 s (waiting for a prompt?) - ended; install the driver from PSW\drivers"
+    }
   }
 }
+
+# 7. enable OOBE BypassNRO (allows "I don't have internet" / local account if user prefers offline setup)
+try {
+  $oobeKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE'
+  if (-not (Test-Path -LiteralPath $oobeKey)) { New-Item -Path $oobeKey -Force | Out-Null }
+  New-ItemProperty -Path $oobeKey -Name 'BypassNRO' -Value 1 -PropertyType DWord -Force | Out-Null
+  L "OOBE BypassNRO=1 set"
+} catch { L ("OOBE BypassNRO error: " + $_.Exception.Message) }
 L "done"

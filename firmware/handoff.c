@@ -68,7 +68,7 @@ int ps5_prepare_handoff(const uint8_t *bp, size_t bp_size,
     uint64_t bytes = u64(image + 24), entry = u64(image + 32);
     uint32_t count = u32(image + 40);
     if (!bytes || bytes > 32 * UINT64_C(1024) * 1024 || (bytes & 4095)
-            || bytes != image_size - 4096 || entry < PS5_IMAGE_BASE || entry >= PS5_IMAGE_BASE + bytes
+            || bytes > image_size - 4096 || entry < PS5_IMAGE_BASE || entry >= PS5_IMAGE_BASE + bytes
             || !count || count > 8 || crc32(image + 4096, (size_t)bytes) != u32(image + 44)) return -3;
     uint64_t fv_starts[8], fv_ends[8];
     for (unsigned i = 0; i < count; i++) {

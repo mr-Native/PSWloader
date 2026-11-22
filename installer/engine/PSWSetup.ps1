@@ -88,8 +88,8 @@ function Write-SystemReport {   # read-only facts that help to reproduce problem
   & $q { $bd = (Get-Partition | Where-Object IsBoot | Select-Object -First 1); Log "  windows disk: $(if ($bd) { "disk $($bd.DiskNumber)" } else { 'unknown' }) sandisk-internal=$(Get-BootDiskIsSandisk)" } 'boot disk'
   & $q { foreach ($n in Get-NetAdapter -Physical) { Log "  network: $($n.InterfaceDescription) status=$($n.Status) speed=$($n.LinkSpeed)" } } 'network'
   & $q { Log "  test signing active: $(Test-TestModeActive); secure boot: $(try { Confirm-SecureBootUEFI } catch { 'n/a' })" } 'boot state'
-  & $q { foreach ($id in 'PCI\VEN_1002&DEV_13FC*', 'PCI\VEN_104D*', 'PCI\VEN_1022*') { foreach ($d in @(Get-PciDevice $id)) { Log "  device: $($d.FriendlyName) [$($d.Status)] $($d.InstanceId)" } } } 'devices'
-  foreach ($svc in 'bc250kmd', 'ps5pwr', 'ps5cmos', 'ps5gbe', 'ps5nvmsi', 'ps5m2flt') {
+  & $q { foreach ($id in 'PCI\VEN_1002*', 'PCI\VEN_14C3*', 'PCI\VEN_1B4B*', 'PCI\VEN_11AB*', 'PCI\VEN_15B7*', 'PCI\VEN_104D*', 'PCI\VEN_1022*') { foreach ($d in @(Get-PciDevice $id)) { Log "  device: $($d.FriendlyName) [$($d.Status)] $($d.InstanceId)" } } } 'devices'
+  foreach ($svc in 'bc250kmd', 'ps5pwr', 'ps5cmos', 'ps5gbe', 'ps5wifi', 'ps5nvmsi', 'ps5m2flt') {
     try { $k = "$CS\Services\$svc"
       if (-not (Test-Path $k)) { Log "  driver $svc not installed"; continue }
       $img = "$(Get-RegValue $k 'ImagePath')" -replace '^\\SystemRoot', $env:SystemRoot -replace '^System32', "$env:SystemRoot\System32" -replace '^\\\?\?\\', ''
@@ -340,7 +340,7 @@ $Comp = [ordered]@{}
 $Comp.Preflight = @{ Default = $true; Phase = 1
   Detect = { $r = [ordered]@{}
     $r.Elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    $r.Ps5Gpu = @(Get-PciDevice 'PCI\VEN_1002&DEV_13F[CE]*').Count -gt 0
+    $r.Ps5Gpu = @(Get-PciDevice 'PCI\VEN_1002&DEV_13*' | Where-Object { $_.InstanceId -match 'DEV_13(FC|FE|DB|DC|DA|F9|FA|FB)' }).Count -gt 0
     $r.Ps5Icc = @(Get-PciDevice 'PCI\VEN_104D&DEV_9107*').Count -gt 0
     $r.Build22631 = [Environment]::OSVersion.Version.Build -ge 22631
     $sb = $false; try { $sb = Confirm-SecureBootUEFI } catch { }; $r.SecureBootOff = -not $sb
@@ -421,6 +421,10 @@ $Comp.Network = @{ Default = $true; Phase = 2   # ps5gbe 1.0.10.0 (0382452a), DH
   Detect = { [ordered]@{ DriverCurrent = Test-DriverCurrent 'ps5gbe' 'drivers/ps5gbe/ps5gbe.sys' } }
   Install = { if (-not (Test-DriverCurrent 'ps5gbe' 'drivers/ps5gbe/ps5gbe.sys') -or $Force) { Install-DriverPackage Network 'drivers/ps5gbe' 'ps5gbe.inf' } }
 }
+$Comp.WiFi = @{ Default = $true; Phase = 2      # ps5wifi 1.0.0 (IW620 1B4B:2B56, NDIS 6.20 Native 802.11)
+  Detect = { [ordered]@{ DriverCurrent = Test-DriverCurrent 'ps5wifi' 'drivers/ps5wifi/ps5wifi.sys' } }
+  Install = { if ((Test-Path (Join-Path $Payload 'drivers/ps5wifi/ps5wifi.inf')) -and (-not (Test-DriverCurrent 'ps5wifi' 'drivers/ps5wifi/ps5wifi.sys') -or $Force)) { Install-DriverPackage WiFi 'drivers/ps5wifi' 'ps5wifi.inf' } }
+}
 $Comp.Storage = @{ Phase = 2
   # only when the internal SanDisk (15B7:5063) is present; values as on the reference install (boot-start filters, MSI limit 1).
   # Skipped when the filters already came in as INF packages through Windows Setup (winpe-drivers\): never twice (GPT shift).
@@ -486,11 +490,12 @@ $Comp.Cmos = @{ Default = $true; Phase = 2   # ps5cmos v1.5 (6ccae2fb, HW-confir
   }
 }
 $Comp.Names = @{ Default = $true; Phase = 2   # "AMD Oberon (PS5 Custom GPU)" (set-hw-names.ps1; the CPU name comes from the firmware)
-  Detect = { $d = @(Get-PciDevice 'PCI\VEN_1002&DEV_13FC*'); [ordered]@{ GpuName = ($d.Count -eq 1 -and (Get-RegValue "$CS\Enum\$($d[0].InstanceId)" 'FriendlyName') -eq 'AMD Oberon (PS5 Custom GPU)') } }
+  Detect = { $d = @(Get-PciDevice 'PCI\VEN_1002&DEV_13*' | Where-Object { $_.InstanceId -match 'DEV_13(FC|FE|DB|DC|DA|F9|FA|FB)' }); [ordered]@{ GpuName = ($d.Count -eq 1 -and (Get-RegValue "$CS\Enum\$($d[0].InstanceId)" 'FriendlyName') -eq 'AMD Oberon (PS5 Custom GPU)') } }
   Install = {
     if ((& $Comp.Names.Detect).GpuName) { return }
     $s = Install-PayloadFile Names 'scripts/set-hw-names.ps1' 'C:\ps5-work\set-hw-names.ps1'
-    if (-not (Get-RegValue "$CS\Enum\$((Get-PciDevice 'PCI\VEN_1002&DEV_13FC*')[0].InstanceId)" 'Driver')) { Log '  GPU has no driver key yet - names follow on the next run (PSW-BootConfirm does not rename)'; return }
+    $g = @(Get-PciDevice 'PCI\VEN_1002&DEV_13*' | Where-Object { $_.InstanceId -match 'DEV_13(FC|FE|DB|DC|DA|F9|FA|FB)' })
+    if (-not $g.Count -or -not (Get-RegValue "$CS\Enum\$($g[0].InstanceId)" 'Driver')) { Log '  GPU has no driver key yet - names follow on the next run (PSW-BootConfirm does not rename)'; return }
     if ($PSCmdlet.ShouldProcess('GPU names', 'set-hw-names apply')) {
       $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ps5-work\set-hw-names.ps1 -Mode apply 2>&1
       Log "  set-hw-names: exit $LASTEXITCODE $(($o | Select-Object -Last 2) -join ' | ')"
@@ -778,6 +783,32 @@ try {
         if ($Quiet -and -not $NoRestart) { Invoke-Tool shutdown.exe @('/r', '/t', '20', '/c', 'PSWloader Setup: phase 2 after restart') | Out-Null }
       } else {
         Remove-SignKeys
+        # Install silent boot-time auto-update checker + version metadata for future updates
+        try {
+          $chkSrc = Join-Path $Payload 'updater\PSWUpdateCheck.ps1'
+          if (Test-Path -LiteralPath $chkSrc) {
+            $updDir = Join-Path $Data 'updater'
+            New-Item -ItemType Directory -Path $updDir -Force | Out-Null
+            $chkDst = Join-Path $updDir 'PSWUpdateCheck.ps1'
+            Copy-Item -LiteralPath $chkSrc -Destination $chkDst -Force
+            $cfgPath = Join-Path $Data 'updater.json'
+            if (-not (Test-Path -LiteralPath $cfgPath)) {
+              [ordered]@{ autoCheck = $true; repo = 'mr-Native/PSWloader' } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cfgPath -Encoding UTF8
+            }
+            $uAct = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+              -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$chkDst`""
+            $uTrg = New-ScheduledTaskTrigger -AtLogOn; $uTrg.Delay = 'PT25S'
+            $uPrn = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+            $uSet = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+            Register-ScheduledTask -TaskName 'PSWloader Update Check' -Action $uAct -Trigger $uTrg -Principal $uPrn -Settings $uSet -Force -ErrorAction Stop | Out-Null
+            Log '  auto-update checker installed (PSWloader Update Check)'
+          }
+          $pkgVer = Join-Path $Payload 'version.json'
+          $verDst = Join-Path $Data 'version.json'
+          if ((Test-Path -LiteralPath $pkgVer) -and -not (Test-Path -LiteralPath $verDst)) {
+            Copy-Item -LiteralPath $pkgVer -Destination $verDst -Force
+          }
+        } catch { LogWarn "auto-update checker setup skipped: $($_.Exception.Message)" }
         foreach ($rt in 'PSWSetup-Resume', 'PS5Setup-Resume') { if (Get-ScheduledTask -TaskName $rt -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $rt -Confirm:$false; Log '  resume task removed' } }
         Log 'final check:'; foreach ($c in $sel) { $r = & $Comp[$c].Detect; $miss = @($r.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object Key)
           Log ('  {0,-10} {1}' -f $c, $(if ($miss.Count) { 'missing: ' + ($miss -join ',') } else { 'ok' }))
