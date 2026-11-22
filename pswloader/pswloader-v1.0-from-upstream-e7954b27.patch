@@ -236,7 +236,7 @@
  
  int main(void) {
 +  /* PSWloader v1.0 (17.11.2026, user request): name and version first */
-+  notify_banner("Welcome to PSWloader!\nv1.0.1\n");
++  notify_banner("Welcome to PSWloader!\nv1.0.2\n");
 +
    if (setup_env()) {
 -    notify("Something went wrong while initiating.\nPlease make sure your fw "

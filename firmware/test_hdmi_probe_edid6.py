@@ -136,6 +136,8 @@ int ps5_hdmi_commands_event(struct ps5_hdmi_commands *P,unsigned Minor,uint8_t V
 int ps5_flava3_video_stage_mode(const struct ps5_hdmi_config*C,unsigned S,const struct ps5_flava3_mode*M,struct ps5_hdmi_commands*P){return 0;}
 int ps5_flava3_video_stage_modex(const struct ps5_hdmi_config*C,unsigned S,const struct ps5_flava3_mode_x*M,struct ps5_hdmi_commands*P){return 0;}   /* r5.13 entry point */
 int ps5_flava3_prepare_stage(const struct ps5_hdmi_config*C,unsigned S,struct ps5_hdmi_commands*P){return 0;}
+int ps5_verde_edid_stage(struct ps5_hdmi_commands*P){StageCalls++;return 0;}
+int ps5_verde_video_stage_mode(const struct ps5_hdmi_config*C,unsigned S,const struct ps5_flava3_mode*M,struct ps5_hdmi_commands*P){return (S==4||S==5||S==8||S==9||S==10||S==14)?1:0;}
 VOID *EFIAPI SetMem(VOID *B,UINTN L,UINT8 V){unsigned char *p=B;while(L--)*p++=V;return B;}   /* r5.20 VideoDiagIcc */
 int ps5_hdmi_commands_submit(const struct ps5_icc_io*Io,const struct ps5_hdmi_commands*P,ps5_icc_notification C,void*Context){
  if(Irq||Tpl!=TPL_HIGH_LEVEL)Forbidden+=1000;

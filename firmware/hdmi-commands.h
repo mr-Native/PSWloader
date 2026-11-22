@@ -15,8 +15,8 @@ int ps5_hdmi_commands_write_block(struct ps5_hdmi_commands *p,const struct ps5_h
 int ps5_hdmi_commands_write(struct ps5_hdmi_commands *p,uint16_t reg,const uint8_t *data,unsigned bytes);
 int ps5_hdmi_commands_write_single(struct ps5_hdmi_commands *p,uint16_t reg,uint8_t value);
 /* Event minor 1: HDCP mode (0..3); minor 3: output stop/TMDS start (0..1);
- * minor 4: HDMI event (EDID/hotplug notification) enable (0..1), Linux sceControlHdmiEvent
- * (linux-vcn4/drivers/ps5/hdmi.c:558-563, i2c_cmd_5_4 :400-415). UNTESTED on hardware. */
+ * minor 4: HDMI event (EDID/hotplug notification) enable (0..1);
+ * minor 5: VERDE audio mute (0..1, Linux i2c_cmd_5_5). */
 int ps5_hdmi_commands_event(struct ps5_hdmi_commands *p,unsigned minor,uint8_t value);
 /* Linux i2c_cmd_4_16 (hdmi.c:367-381): a converter sequence passed verbatim (the EDID/PLL
  * sequences of hdmiSystemResume, hdmi.c:509-535). 1..251 bytes. UNTESTED on hardware. */
@@ -27,6 +27,8 @@ int ps5_hdmi_commands_mask(struct ps5_hdmi_commands *p,uint16_t reg,uint8_t valu
 /* Converter-side masked wait: set=1 waits set, set=0 waits clear.
  * ICC transport deadline still applies; no host-side repeat. */
 int ps5_hdmi_commands_wait(struct ps5_hdmi_commands *p,uint16_t reg,uint8_t mask,int set);
+/* Converter-side exact-value wait (Linux i2c_cmd_3_5, used on VERDE). */
+int ps5_hdmi_commands_wait_eq(struct ps5_hdmi_commands *p,uint16_t reg,uint8_t value);
 int ps5_hdmi_commands_delay(struct ps5_hdmi_commands *p,unsigned milliseconds);
 /* -6 service rejection/short reply; transport errors propagated unchanged.
  * Success acknowledges command processing, not a functioning display. */

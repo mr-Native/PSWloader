@@ -36,7 +36,7 @@ STATIC BOOLEAN mPs5BsTraceWarm;   /* lab: set by Ps5WarmReadRecord on a warm run
 #define PS5_QUIET_SCREEN 1
 #endif
 #define PS5_BRAND_TITLE L"PSWloader"   /* r5.17: product name (user 17.11.2026) */
-#define PS5_BRAND_VERSION L"v1.0.1"
+#define PS5_BRAND_VERSION L"v1.0.2"
 #define PS5_FW_RELEASE "r5.25.8"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG); bump with every build */
 #if PS5_QUIET_SCREEN
 #define PS5_SCREEN(...) do{CHAR16 Ps5Q_[256];UnicodeSPrint(Ps5Q_,sizeof(Ps5Q_),__VA_ARGS__);DEBUG((DEBUG_INFO,"PS5 screen (quiet): %s",Ps5Q_));}while(0)
@@ -553,9 +553,11 @@ VOID Ps5WarmPciDump(VOID)
     EFI_PCI_IO_PROTOCOL *Io; UINT8 Cc[3]; UINT32 Id=0,B0=0,B1=0; UINT16 Cmd=0;
     if(EFI_ERROR(gBS->HandleProtocol(H[I],&gEfiPciIoProtocolGuid,(VOID **)&Io)))continue;
     Io->Pci.Read(Io,EfiPciIoWidthUint32,0,1,&Id);Io->Pci.Read(Io,EfiPciIoWidthUint8,9,3,Cc);Io->Pci.Read(Io,EfiPciIoWidthUint16,4,1,&Cmd);
-    if(!((Cc[2]==1&&Cc[1]==8)||(Cc[2]==0xC&&Cc[1]==3)||Id==0x13FC1002U))continue;
-    Io->Mem.Read(Io,EfiPciIoWidthUint32,(Id==0x13FC1002U)?5:0,0,1,&B0);
-    Io->Mem.Read(Io,EfiPciIoWidthUint32,(Id==0x13FC1002U)?5:0,4,1,&B1);
+    BOOLEAN IsGpu=(Id==0x13FC1002U || Id==0x13DB1002U || Id==0x13DC1002U ||
+                   Id==0x13DA1002U || Id==0x13F91002U || Id==0x13FA1002U || Id==0x13FB1002U);
+    if(!((Cc[2]==1&&Cc[1]==8)||(Cc[2]==0xC&&Cc[1]==3)||IsGpu))continue;
+    Io->Mem.Read(Io,EfiPciIoWidthUint32,IsGpu?5:0,0,1,&B0);
+    Io->Mem.Read(Io,EfiPciIoWidthUint32,IsGpu?5:0,4,1,&B1);
     DEBUG((DEBUG_ERROR,"PS5 warm pci: %08x class %02x%02x cmd %04x bar[0]=%08x [4]=%08x%a\n",Id,Cc[2],Cc[1],Cmd,B0,B1,
            (B0==0xFFFFFFFFU&&B1==0xFFFFFFFFU)?" ALL-ONES":""));
   }

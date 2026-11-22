@@ -30,6 +30,8 @@ int ps5_flava3_video_stage_modex(const struct ps5_hdmi_config*C,unsigned S,const
 VOID *EFIAPI CopyMem(VOID *D,CONST VOID *S,UINTN N){unsigned char *d=D;const unsigned char *s=S;while(N--)*d++=*s++;return D;}
 VOID *EFIAPI ZeroMem(VOID *D,UINTN N){unsigned char *d=D;while(N--)*d++=0;return D;}   /* r5.1 ButtonReadEx */
 int ps5_flava3_prepare_stage(const struct ps5_hdmi_config*C,unsigned S,struct ps5_hdmi_commands*P){return C->converter!=2||S>2?-1:0;}
+int ps5_verde_edid_stage(struct ps5_hdmi_commands*P){return 0;}
+int ps5_verde_video_stage_mode(const struct ps5_hdmi_config*C,unsigned S,const struct ps5_flava3_mode*M,struct ps5_hdmi_commands*P){return C->converter!=3||S>14?-1:((S==4||S==5||S==8||S==9||S==10||S==14)?1:0);}
 int ps5_hdmi_commands_submit(const struct ps5_icc_io*Io,const struct ps5_hdmi_commands*P,ps5_icc_notification C,void*Context){
  SubmitCalls++;if(Irq||Tpl!=TPL_HIGH_LEVEL||C!=ps5_edid_notification||Context!=&mEdid||Io->timeout_ticks!=TSC_HZ*12)WrongContext++;
  ReentryBlocked=Installed->Stage(0)==EFI_ALREADY_STARTED;return SubmitReply;

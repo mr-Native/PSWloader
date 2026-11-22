@@ -26,7 +26,8 @@ STATIC VOID Ps5NativeGpuProbe(VOID) {
     Status=gBS->HandleProtocol(Handles[I],&gEfiPciIoProtocolGuid,(VOID **)&Pci);
     if(EFI_ERROR(Status))continue;
     Status=Pci->Pci.Read(Pci,EfiPciIoWidthUint32,0,1,&Id);
-    if(EFI_ERROR(Status) || Id!=0x13fc1002U)continue;
+    if(EFI_ERROR(Status) || !(Id==0x13fc1002U || Id==0x13db1002U || Id==0x13dc1002U ||
+       Id==0x13da1002U || Id==0x13f91002U || Id==0x13fa1002U || Id==0x13fb1002U))continue;
     Status=Pci->Pci.Read(Pci,EfiPciIoWidthUint16,4,1,&Command);
     if(EFI_ERROR(Status) || !(Command&2U))continue;
     // MMHUB segment0 0x1a000 + mmMMMC_VM_* from Linux DCN201 resource.

@@ -193,7 +193,8 @@ static int FindEv(int kind, unsigned table, unsigned action){
 }
 int main(void){
  void *Rom=mmap((void*)0xc0000,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
- assert(Rom==(void*)0xc0000); ((UINT8*)Rom)[2]=108;
+ assert(Rom==(void*)0xc0000);
+ { UINT8 *R=(UINT8*)Rom; R[0]=0x55; R[1]=0xaa; R[2]=108; R[0x48]=0x00; R[0x49]=0x01; R[0x104]='A'; R[0x105]='T'; R[0x106]='O'; R[0x107]='M'; }
  Bs.CalculateCrc32=Crc; Bs.LocateHandleBuffer=Locate; Bs.HandleProtocol=Handle; Bs.LocateProtocol=LocateProtocol; Bs.Stall=Stall;
  VideoProto.Stage=Stage; VideoProto.Read=NULL; Pci.GetBarAttributes=MockGetBarAttributes;
  Pci.Pci.Read=ConfigRead; Pci.Mem.Read=Read; Pci.Mem.Write=Write;

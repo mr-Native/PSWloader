@@ -922,7 +922,7 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
         fdf = fdf.replace(anchor, anchor + '\nINF ' + module)
         (package / 'Ps5UefiPayload.fdf').write_text(fdf)
         source = source.replace('UefiPayloadPkg/UefiPayloadPkg.fdf', 'Ps5PlatformPkg/Ps5UefiPayload.fdf')
-        for stem in ('icc-power', 'icc-hdmi', 'icc-edid', 'hdmi-commands', 'flava3-prepare', 'flava3-video', 'flava3-edid', 'ps5-edid-info', 'button-keys'):
+        for stem in ('icc-power', 'icc-hdmi', 'icc-edid', 'hdmi-commands', 'flava3-prepare', 'flava3-video', 'flava3-edid', 'verde-video', 'ps5-edid-info', 'button-keys'):
             for suffix in ('.c', '.h'):
                 shutil.copy2(HERE / (stem + suffix), package / 'HdmiProbeDxe' / (stem + suffix))
         shutil.copy2(HERE/'ps5-hdmi-video-protocol.h',package/'HdmiProbeDxe/ps5-hdmi-video-protocol.h')
@@ -969,10 +969,10 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
         source = source.replace(anchor, anchor + '  LvglLib|LvglPkg/Library/LvglLib/LvglLib.inf\n  LvglThemeLib|LvglPkg/Library/LvglThemeLib/LvglThemeLib.inf\n'
                                 '  LvglUiConfigLib|LvglPkg/Library/LvglUiConfigLib/LvglUiConfigLib.inf\n', 1)
         source += ('\n[PcdsFixedAtBuild]\n  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderTitle|"UEFI Boot Manager"\n'
-                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0.1"\n'
+                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0.2"\n'
                    # r5.24 (user: one visible name): system table FirmwareVendor + version string (UiApp, Windows)
                    '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"PSWloader"\n'
-                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0.1"\n'
+                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0.2"\n'
                    # r5.7 (menu test 16.11.): safe inner margin (TV/capture overscan cut ~15-20 px on the left)
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameEnabled|TRUE\n'
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameHeightPct|94\n'
@@ -1142,7 +1142,7 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
                     icc_power_hashes={name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
                                       for name in ('icc-power.c', 'icc-power.h')},
                     hdmi_source_hashes={name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
-                                        for name in ('icc-hdmi.c', 'icc-hdmi.h', 'icc-edid.c', 'icc-edid.h','hdmi-commands.c','hdmi-commands.h','flava3-prepare.c','flava3-prepare.h','flava3-video.c','flava3-video.h','button-keys.c','button-keys.h','ps5-hdmi-video-protocol.h','Ps5PlatformPkg/HdmiProbeDxe/HdmiProbeDxe.c','Ps5PlatformPkg/HdmiProbeDxe/HdmiProbeDxe.inf')} if args.hdmi_probe else {},
+                                        for name in ('icc-hdmi.c', 'icc-hdmi.h', 'icc-edid.c', 'icc-edid.h','hdmi-commands.c','hdmi-commands.h','flava3-prepare.c','flava3-prepare.h','flava3-video.c','flava3-video.h','verde-video.c','verde-video.h','button-keys.c','button-keys.h','ps5-hdmi-video-protocol.h','Ps5PlatformPkg/HdmiProbeDxe/HdmiProbeDxe.c','Ps5PlatformPkg/HdmiProbeDxe/HdmiProbeDxe.inf')} if args.hdmi_probe else {},
                     pci_transport_hashes={name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
                                           for name in ('pci-transport.c', 'pci-transport.h')},
                     m2_overlay_enabled=args.m2_overlay,

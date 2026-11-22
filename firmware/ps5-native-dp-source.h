@@ -8,15 +8,23 @@
 #ifdef PS5_NATIVE_DP_VIDEO
 #include "ps5-native-dp-video.h"
 #endif
+STATIC BOOLEAN Ps5IsOberonGpu(UINT32 Id) {
+  return Id==0x13fc1002U || Id==0x13db1002U || Id==0x13dc1002U ||
+         Id==0x13da1002U || Id==0x13f91002U || Id==0x13fa1002U || Id==0x13fb1002U;
+}
 STATIC EFI_STATUS Ps5NativeDpSource(VOID) {
   UINT8 *Rom=AllocateZeroPool(65536);
   if(!Rom)return EFI_OUT_OF_RESOURCES;
   volatile UINT8 *Source=(VOID *)(UINTN)0xc0000;
-  /* ROM header declares 108 * 512 bytes; the following 10KiB are not ROM. */
-  for(UINTN I=0;I<0xd800;I++)Rom[I]=Source[I];
-  UINT32 Crc=0;
-  EFI_STATUS Status=gBS->CalculateCrc32(Rom,0xd800,&Crc);
-  if(EFI_ERROR(Status) || Crc!=0xd5357201U || Rom[2]!=108){FreePool(Rom);return EFI_COMPROMISED_DATA;}
+  /* Validate AMD ATOM VBIOS dynamically so all PS5 Fat / Slim / Pro revisions work. */
+  if(Source[0]!=0x55 || Source[1]!=0xaa){FreePool(Rom);return EFI_COMPROMISED_DATA;}
+  UINTN Length=(UINTN)Source[2]*512;
+  if(Length<0x200 || Length>65536){FreePool(Rom);return EFI_COMPROMISED_DATA;}
+  for(UINTN I=0;I<Length;I++)Rom[I]=Source[I];
+  UINT16 Header=(UINT16)((UINT16)Rom[0x48]|((UINT16)Rom[0x49]<<8));
+  if(Header>Length-36 || Rom[Header+4]!='A' || Rom[Header+5]!='T' ||
+     Rom[Header+6]!='O' || Rom[Header+7]!='M'){FreePool(Rom);return EFI_COMPROMISED_DATA;}
+  EFI_STATUS Status;
   EFI_HANDLE *Handles=NULL;UINTN Count=0;
   Status=gBS->LocateHandleBuffer(ByProtocol,&gEfiPciIoProtocolGuid,NULL,&Count,&Handles);
   if(EFI_ERROR(Status)){FreePool(Rom);return Status;}
@@ -24,7 +32,7 @@ STATIC EFI_STATUS Ps5NativeDpSource(VOID) {
   for(UINTN I=0;I<Count;I++) {
     EFI_PCI_IO_PROTOCOL *Pci=NULL;UINT32 Id=0;UINT16 Command=0;
     if(EFI_ERROR(gBS->HandleProtocol(Handles[I],&gEfiPciIoProtocolGuid,(VOID **)&Pci)) ||
-       EFI_ERROR(Pci->Pci.Read(Pci,EfiPciIoWidthUint32,0,1,&Id)) || Id!=0x13fc1002U)continue;
+       EFI_ERROR(Pci->Pci.Read(Pci,EfiPciIoWidthUint32,0,1,&Id)) || !Ps5IsOberonGpu(Id))continue;
     Status=Pci->Pci.Read(Pci,EfiPciIoWidthUint16,4,1,&Command);
     if(EFI_ERROR(Status) || !(Command&2)){Status=EFI_NOT_READY;break;}
     UINT32 O[2]={0},H[2]={0};

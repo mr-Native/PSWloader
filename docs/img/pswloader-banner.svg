@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="t d">
   <title id="t">PSWloader</title>
-  <desc id="d">PSWloader v1.0.1 - Windows 11 on the PS5, natively</desc>
+  <desc id="d">PSWloader v1.0.2 - Windows 11 on the PS5, natively</desc>
   <rect width="1200" height="300" rx="16" fill="#fcfcfb" stroke="#d9d8d4"/>
   <g transform="translate(96 78)">
     <circle cx="68" cy="68" r="68" fill="#2a78d6"/>
     <path d="M30 38 L60 68 L30 98 M70 38 L100 68 L70 98" fill="none" stroke="#fcfcfb" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
   <text x="280" y="150" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="96" font-weight="700" fill="#0b0b0b">PSW<tspan fill="#2a78d6">loader</tspan></text>
-  <text x="284" y="206" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="32" fill="#52514e">Windows 11 on the PS5, natively  ·  v1.0.1</text>
+  <text x="284" y="206" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="32" fill="#52514e">Windows 11 on the PS5, natively  ·  v1.0.2</text>
 </svg>

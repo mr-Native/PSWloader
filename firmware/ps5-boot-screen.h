@@ -10,7 +10,7 @@
 #include <Protocol/HiiFont.h>
 
 #define PS5_SCREEN_NAME    L"PSWloader"
-#define PS5_SCREEN_VERSION L"v1.0.1"
+#define PS5_SCREEN_VERSION L"v1.0.2"
 
 STATIC EFI_GUID mPs5HiiFontGuid = { 0xe9ca4775, 0x8657, 0x47fc, { 0x97, 0xe7, 0x7e, 0xd6, 0x5a, 0x08, 0x43, 0x24 } };
 

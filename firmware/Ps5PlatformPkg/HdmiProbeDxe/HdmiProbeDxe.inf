@@ -15,6 +15,7 @@
   flava3-prepare.c
   flava3-video.c
   flava3-edid.c
+  verde-video.c
   ps5-edid-info.c
   button-keys.c
 [Packages]

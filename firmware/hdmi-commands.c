@@ -60,7 +60,7 @@ int ps5_hdmi_commands_write_single(struct ps5_hdmi_commands *p,uint16_t reg,uint
     finish(p,8);return 0;
 }
 int ps5_hdmi_commands_event(struct ps5_hdmi_commands *p,unsigned minor,uint8_t value) {
-    if(!((minor==1 && value<=3)||(minor==3 && value<=1)||(minor==4 && value<=1)) || !reserve(p,5))return -1;
+    if(!((minor==1 && value<=3)||(minor==3 && value<=1)||(minor==4 && value<=1)||(minor==5 && value<=1)) || !reserve(p,5))return -1;
     uint8_t *d=p->data+p->used;
     d[0]=5;d[1]=5;d[2]=(uint8_t)minor;d[3]=1;d[4]=value;
     finish(p,5);return 0;
@@ -93,6 +93,13 @@ int ps5_hdmi_commands_wait(struct ps5_hdmi_commands *p,uint16_t reg,uint8_t mask
     d[5]=(uint8_t)(reg>>8);d[6]=(uint8_t)reg;d[7]=mask;
     finish(p,8);return 0;
 }
+int ps5_hdmi_commands_wait_eq(struct ps5_hdmi_commands *p,uint16_t reg,uint8_t value) {
+    if(!reserve(p,8))return -1;
+    uint8_t *d=p->data+p->used;
+    d[0]=3;d[1]=8;d[2]=5;d[3]=1;d[4]=0;
+    d[5]=(uint8_t)(reg>>8);d[6]=(uint8_t)reg;d[7]=value;
+    finish(p,8);return 0;
+}
 int ps5_hdmi_commands_delay(struct ps5_hdmi_commands *p,unsigned milliseconds) {
     if(milliseconds>65535 || !reserve(p,8))return -1;
     uint8_t *d=p->data+p->used;
@@ -117,7 +124,7 @@ int ps5_hdmi_commands_submit(const struct ps5_icc_io *io,const struct ps5_hdmi_c
             if(entries!=d[3])return -1;
         } else if(d[0]==2 && d[2]==1) {
             if(n!=8 || d[3]!=1 || d[4]!=1)return -1;
-        } else if(d[0]==5 && (d[2]==1 || d[2]==3 || d[2]==4)) {
+        } else if(d[0]==5 && (d[2]==1 || d[2]==3 || d[2]==4 || d[2]==5)) {
             if(n!=5 || d[3]!=1 || d[4]>(d[2]==1?3:1))return -1;
         } else if(d[0]==4 && d[2]==16) {
             if(n<5 || d[3]!=1)return -1;
@@ -127,7 +134,7 @@ int ps5_hdmi_commands_submit(const struct ps5_icc_io *io,const struct ps5_hdmi_c
             if(n!=9 || d[3]!=1 || d[4]!=1)return -1;
         } else if(d[0]==3 && d[2]==1) {
             if(n!=8 || d[3]!=1 || d[4]!=0 || d[7]!=0)return -1;
-        } else if(d[0]==3 && (d[2]==2 || d[2]==3)) {
+        } else if(d[0]==3 && (d[2]==2 || d[2]==3 || d[2]==5)) {
             if(n!=8 || d[3]!=1 || d[4]!=0)return -1;
         } else return -1;
         offset+=n;count++;

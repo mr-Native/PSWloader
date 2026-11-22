@@ -24,6 +24,7 @@
 #include "flava3-prepare.h"
 #include "flava3-video.h"
 #include "flava3-edid.h"
+#include "verde-video.h"
 #include "ps5-hdmi-video-protocol.h"
 #include "ps5-fan.h"            /* r5.14 */
 #include "button-keys.h"
@@ -85,8 +86,14 @@ STATIC EFI_STATUS EFIAPI VideoStage(UINTN Stage) {
   if(mVideoBusy)return EFI_ALREADY_STARTED;
   if(!UncachedMmio(MAILBOX) || !UncachedMmio(DOORBELL))return EFI_NOT_READY;
   struct ps5_hdmi_commands Packet;
-  int Result=(Stage<8 || Stage>=11) ? ps5_flava3_video_stage_modex(&mVideoConfig,(unsigned)Stage,mVideoModeSet,&Packet) :
-                      ps5_flava3_prepare_stage(&mVideoConfig,(unsigned)Stage-8,&Packet);
+  int Result;
+  if(mVideoConfig.converter==3) {
+    Result=ps5_verde_video_stage_mode(&mVideoConfig,(unsigned)Stage,mVideoModeSet?&mVideoModeSet->m:NULL,&Packet);
+    if(Result==1)return EFI_SUCCESS;
+  } else {
+    Result=(Stage<8 || Stage>=11) ? ps5_flava3_video_stage_modex(&mVideoConfig,(unsigned)Stage,mVideoModeSet,&Packet) :
+                        ps5_flava3_prepare_stage(&mVideoConfig,(unsigned)Stage-8,&Packet);
+  }
   if(Result)return EFI_UNSUPPORTED;
   mVideoBusy=TRUE;
   /* PS5 Linux spcie.c ICC_TIMEOUT_MSECS=12000. Video batches contain
@@ -107,10 +114,13 @@ STATIC EFI_STATUS EFIAPI VideoStage(UINTN Stage) {
     DEBUG((DEBUG_ERROR,"PS5 ICC after stage %u: tolerated=%u dropped=%u\n",Stage,SeenTolerated,SeenDropped));
   }
 #endif
+  /* PS5 Linux sceHdmiDeviceSetVideoMute/Audio on VERDE: reply status format differs from FLAVA3. */
+  if(mVideoConfig.converter==3 && (Stage==11 || Stage==12 || Stage==13) && Result==-6)return EFI_SUCCESS;
   return ((Stage==6&&Stop)||Result)?EFI_DEVICE_ERROR:EFI_SUCCESS;
 }
 STATIC EFI_STATUS EFIAPI VideoReadRegisters(UINT16 Register,UINTN Count,UINT8 *Out) {
   if(!Out || !Count || Count>32 || Count>65536U-Register)return EFI_INVALID_PARAMETER;
+  if(mVideoConfig.converter==3)return EFI_UNSUPPORTED;
   if(mVideoBusy)return EFI_ALREADY_STARTED;
   if(!UncachedMmio(MAILBOX) || !UncachedMmio(DOORBELL))return EFI_NOT_READY;
   mVideoBusy=TRUE;
@@ -524,17 +534,18 @@ STATIC BOOLEAN EdidEspMounted(VOID) {
 STATIC UINT32 EdidMs(UINT64 Ticks) { return (UINT32)DivU64x64Remainder(Ticks*1000,TSC_HZ,NULL); }
 STATIC int EdidRequest(struct ps5_icc_io *Io,unsigned *StagesOut) {   /* r5.16.3: also used for the resend */
  UINT64 Start=AsmReadTsc();unsigned Stages=0;int Request=0;
- for(unsigned S=0;S<PS5_FLAVA3_EDID_STAGES;S++) {
+ unsigned Total=(mVideoConfig.converter==3)?1U:PS5_FLAVA3_EDID_STAGES;
+ for(unsigned S=0;S<Total;S++) {
    if(AsmReadTsc()-Start>=PS5_EDID_REQUEST_BUDGET){Request=-8;break;}
    struct ps5_hdmi_commands Packet;
    UINT64 T0=AsmReadTsc();
-   int R=ps5_flava3_edid_stage(S,&Packet);
+   int R=(mVideoConfig.converter==3)?ps5_verde_edid_stage(&Packet):ps5_flava3_edid_stage(S,&Packet);
    if(!R) {
      EFI_TPL Old=gBS->RaiseTPL(TPL_HIGH_LEVEL);BOOLEAN Ints=SaveAndDisableInterrupts();
      R=ps5_hdmi_commands_submit(Io,&Packet,ps5_edid_notification,&mEdid);
      SetInterruptState(Ints);gBS->RestoreTPL(Old);
    }
-   DEBUG((DEBUG_ERROR,"PS5 HDMI EDID packet %u/%u: result=%d ms=%u\n",S+1,PS5_FLAVA3_EDID_STAGES,R,EdidMs(AsmReadTsc()-T0)));
+   DEBUG((DEBUG_ERROR,"PS5 HDMI EDID packet %u/%u: result=%d ms=%u\n",S+1,Total,R,EdidMs(AsmReadTsc()-T0)));
    EdidFlush();
    if(R){Request=R;break;}
    Stages=S+1;
@@ -605,7 +616,7 @@ STATIC VOID EdidPublish(VOID) {
 STATIC VOID Ps5EdidPhaseFromVideo(UINTN Stage) {
   EFI_TPL Tpl=gBS->RaiseTPL(TPL_HIGH_LEVEL);gBS->RestoreTPL(Tpl);
   if(Tpl!=TPL_APPLICATION){DEBUG((DEBUG_ERROR,"PS5 HDMI EDID phase: skipped, video stage %u called at TPL %u\n",(UINT32)Stage,(UINT32)Tpl));return;}
-  if(mVideoConfig.converter!=2){DEBUG((DEBUG_ERROR,"PS5 HDMI EDID phase: skipped, converter %u\n",(UINT32)mVideoConfig.converter));return;}
+  if(mVideoConfig.converter!=2 && mVideoConfig.converter!=3){DEBUG((DEBUG_ERROR,"PS5 HDMI EDID phase: skipped, converter %u\n",(UINT32)mVideoConfig.converter));return;}
   /* r2 (15.11.): never skip for a missing ESP - the policy needs the EDID (else 1080p). The log stays
    * in the 64 KiB ring and is exported by the next snapshot once the ESP is mounted. */
   BOOLEAN EspMounted=EdidEspMounted();
@@ -766,8 +777,12 @@ EFI_STATUS EFIAPI Ps5HdmiProbeEntry(EFI_HANDLE ImageHandle,EFI_SYSTEM_TABLE *Sys
   if(Result==0) {
     DEBUG((DEBUG_INFO,"PS5 HDMI config raw: %02x %02x %02x %02x %02x %02x %02x %02x converter=%u\n",
       Config.raw[0],Config.raw[1],Config.raw[2],Config.raw[3],Config.raw[4],Config.raw[5],Config.raw[6],Config.raw[7],Config.converter));
-    Result=ps5_flava3_prepare(&Io,&Config,&Completed,ps5_edid_notification,&mEdid);
-    DEBUG((DEBUG_ERROR,"PS5 HDMI prepare: result=%d acknowledged=%u/3; DCN/link/video timing not initialized\n",Result,Completed));
+    if(Config.converter==3) {
+      DEBUG((DEBUG_ERROR,"PS5 HDMI prepare: VERDE converter (no pre-stage required)\n"));
+    } else {
+      Result=ps5_flava3_prepare(&Io,&Config,&Completed,ps5_edid_notification,&mEdid);
+      DEBUG((DEBUG_ERROR,"PS5 HDMI prepare: result=%d acknowledged=%u/3; DCN/link/video timing not initialized\n",Result,Completed));
+    }
     if(Result==0)mButtonEnabled=Ps5ButtonEnable(&Io);
   }
 #endif

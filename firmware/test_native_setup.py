@@ -99,7 +99,7 @@ START_SCREEN = r'''
 #define PS5_QUIET_SCREEN 1
 #define PS5_MENU_IDLE_S 0
 #define PS5_BRAND_TITLE L"PSWloader"
-#define PS5_BRAND_VERSION L"v1.0.1"
+#define PS5_BRAND_VERSION L"v1.0.2"
 static unsigned UsbAllow; static void Ps5UsbMassAllow(const char *Why){(void)Why;UsbAllow++;}   /* r5.21 */
 static EFI_BOOT_SERVICES Bs;EFI_BOOT_SERVICES *gBS=&Bs;
 static EFI_SYSTEM_TABLE St;EFI_SYSTEM_TABLE *gST=&St;
