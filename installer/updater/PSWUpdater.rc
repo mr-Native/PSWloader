@@ -9,11 +9,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "PSWloader"
       VALUE "FileDescription", "PSWloader System Updater"
-      VALUE "FileVersion", "1.0.3"
+      VALUE "FileVersion", "1.0.4"
       VALUE "InternalName", "PSWUpdater"
       VALUE "OriginalFilename", "PSWUpdater.exe"
       VALUE "ProductName", "PSWloader"
-      VALUE "ProductVersion", "1.0.3"
+      VALUE "ProductVersion", "1.0.4"
     END
   END
   BLOCK "VarFileInfo"

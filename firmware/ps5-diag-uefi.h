@@ -277,7 +277,7 @@ STATIC EFI_STATUS Ps5DiagSaveLogEx(CONST struct ps5_diag_report *R,unsigned Lang
   CHAR8 Fw[96];
   (VOID)Lang;
   if(SavedWhere&&SavedWhereCap)SavedWhere[0]='\0';
-  AsciiSPrint(Fw,sizeof(Fw),"PSWloader v1.0.3 (%a), %s rev %x",PS5_FW_RELEASE,gST->FirmwareVendor?gST->FirmwareVendor:L"?",gST->FirmwareRevision);   /* r5.20.7 */
+  AsciiSPrint(Fw,sizeof(Fw),"PSWloader v1.0.4 (%a), %s rev %x",PS5_FW_RELEASE,gST->FirmwareVendor?gST->FirmwareVendor:L"?",gST->FirmwareRevision);   /* r5.20.7 */
   UINTN Len=ps5_diag_format(R,0,Fw,Text,sizeof(Text));
   Len=Ps5DiagAppendPciInventory(Text,sizeof(Text),Len);
   EFI_STATUS V=gRT->SetVariable(PS5_DIAG_LOG_VARIABLE,&LogGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS,Len,Text);   /* gone at ExitBootServices */
