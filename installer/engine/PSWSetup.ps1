@@ -1,4 +1,6 @@
-# PSWSetup.ps1 v0.5.4 (v0.5.4: PowerPlan also turns off USB selective suspend and USB 3 link power management (U1/U2) - HW 18.11.:
+# PSWSetup.ps1 v0.5.5 (v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
+#   DefaultsV2 value that differs from its compiled factory value (0xC0000182, Code 37), so a fresh install never got a first
+#   driver start; mode 0 comes from the generation override written by ps5-postboot.ps1; v0.5.4: PowerPlan also turns off USB selective suspend and USB 3 link power management (U1/U2) - HW 18.11.:
 #   with selective suspend on, an idle USB SSD (RTL9210B, UAS) on the AMD xHCI does not come back (events 129/153, no more I/O);
 #   isolated with reboots + 150 s idle: selective suspend is the cause, LPM off is kept as a harmless extra; off: 8 GiB at 310 MB/s, no reset; v0.5.3: v0.5.3: after a reinstall-at-boot update the log and the final line say 'restart twice' - HW 17.11.: the
 #   first start reinstalls the device and switches ImagePath, the new driver is loaded only at the second start; v0.5.2: Power update without restarting the device 104D:9107: when ps5pwr is already bound, the new
@@ -364,9 +366,9 @@ $Comp.Boot = @{ Default = $true; Phase = 1   # BCD as on the reference install; 
         $script:RebootNeeded = $true } }
   }
 }
-$Comp.Gpu = @{ Default = $true; Phase = 2   # bc250kmd v10.14 (release set v1.0, ps5gpu.inf + shipped catalog, VBIOS in System32\drivers), EnableDisplayModes=0
+$Comp.Gpu = @{ Default = $true; Phase = 2   # bc250kmd v10.14 (release set v1.0, ps5gpu.inf + shipped catalog, VBIOS in System32\drivers), EnableDisplayModes=0 via generation override (ps5-postboot)
   Detect = { [ordered]@{ KmdCurrent = Test-DriverCurrent 'bc250kmd' 'drivers/bc250kmd/bc250kmd.sys'
-                         DisplayModes0 = (Get-RegValue "$CS\Services\bc250kmd\Parameters\DefaultsV2" 'EnableDisplayModes') -eq 0
+                         DisplayModesFactory = (Get-RegValue "$CS\Services\bc250kmd\Parameters\DefaultsV2" 'EnableDisplayModes') -eq 2
                          DesktopRouter = (Get-RegValue 'HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter' 'DwmForceCpu') -eq 0
                          TdrDelay10 = (Get-RegValue "$CS\Control\GraphicsDrivers" 'TdrDelay') -eq 10 } }
   Install = {
@@ -386,15 +388,11 @@ $Comp.Gpu = @{ Default = $true; Phase = 2   # bc250kmd v10.14 (release set v1.0,
       $gpuInf = if (Test-Path -LiteralPath (Join-Path $Payload 'drivers\bc250kmd\ps5gpu.inf')) { 'ps5gpu.inf' } else { 'bc250kmd.inf' }
       Install-DriverPackage Gpu 'drivers/bc250kmd' $gpuInf {
         param($stage)
-        if ($gpuInf -eq 'bc250kmd.inf') {   # older package without a shipped catalog: previous way (VBIOS + EnableDisplayModes edit in the package)
+        if ($gpuInf -eq 'bc250kmd.inf') {   # older package without a shipped catalog: previous way (VBIOS in the package; DefaultsV2 stays factory)
           Copy-Item $vb[1] (Join-Path $stage 'ps5-vbios.bin') -Force
-          Remove-Item (Join-Path $stage 'LICENSE.amdgpu') -ErrorAction SilentlyContinue
-          $inf = Join-Path $stage 'bc250kmd.inf'
-          $t = [IO.File]::ReadAllText($inf); $n = $t -replace '(?m)^(HKR,Parameters\\DefaultsV2,EnableDisplayModes,0x00010001,)\d+', '${1}0'
-          if ($n -eq $t -and $t -notmatch 'EnableDisplayModes,0x00010001,0') { throw 'bc250kmd.inf: EnableDisplayModes default line not found' }
-          [IO.File]::WriteAllText($inf, $n, [Text.Encoding]::ASCII) } }
+          Remove-Item (Join-Path $stage 'LICENSE.amdgpu') -ErrorAction SilentlyContinue } }
     }
-    Set-RegValue Gpu "$CS\Services\bc250kmd\Parameters\DefaultsV2" 'EnableDisplayModes' 0 DWord | Out-Null   # every new generation
+    Set-RegValue Gpu "$CS\Services\bc250kmd\Parameters\DefaultsV2" 'EnableDisplayModes' 2 DWord | Out-Null   # catalog factory value; KMD refuses to start otherwise (mode 0 = generation override)
     foreach ($kv in @(@('DwmForceCpu', 0), @('RequireKmdSwitches', 0), @('DirectFlipFront', 0))) { Set-RegValue Gpu 'HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter' $kv[0] $kv[1] DWord | Out-Null }
     Set-RegValue Gpu "$CS\Control\GraphicsDrivers" 'TdrDelay' 10 DWord | Out-Null; Set-RegValue Gpu "$CS\Control\GraphicsDrivers" 'TdrDdiDelay' 10 DWord | Out-Null
     foreach ($d in Get-PciDevice 'PCI\VEN_1002&DEV_13EA*') {   # HDMI audio: the inbox INF writes MSISupported=0 -> Code 12

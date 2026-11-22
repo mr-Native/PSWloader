@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="t d">
+  <title id="t">PSWloader</title>
+  <desc id="d">PSWloader - Run native Windows 11 on your PS5</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="glow" cx="76%" cy="74%" r="52%">
+      <stop offset="0%" stop-color="#3987e5" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#1d3d73" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#0d0e14" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="22%" cy="32%" r="40%">
+      <stop offset="0%" stop-color="#3987e5" stop-opacity="0.09"/>
+      <stop offset="100%" stop-color="#0d0e14" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="#0d0e14"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <rect width="1280" height="640" fill="url(#glow2)"/>
+
+  <!-- Left monogram block (stacked geometric typography + 2x2 Windows tile) -->
+  <g transform="translate(124 114)">
+    <text x="0" y="182" font-family="'DejaVu Sans Mono', monospace" font-size="216" font-weight="700" letter-spacing="-10" fill="#f1f3f8">PSW</text>
+    <!-- Second row: "11" in PSWloader blue + crisp white 2x2 Windows 11 tile aligned flush with PSW -->
+    <text x="0" y="388" font-family="'DejaVu Sans Mono', monospace" font-size="196" font-weight="700" letter-spacing="-10" fill="#4f95ef">11</text>
+    <g transform="translate(228 246)" fill="#f1f3f8">
+      <rect x="0"  y="0"  width="66" height="66" rx="4"/>
+      <rect x="76" y="0"  width="66" height="66" rx="4"/>
+      <rect x="0"  y="76" width="66" height="66" rx="4"/>
+      <rect x="76" y="76" width="66" height="66" rx="4"/>
+    </g>
+  </g>
+
+  <!-- Right headline + subtitle -->
+  <g transform="translate(572 194)">
+    <text x="0" y="54"  font-family="'DejaVu Sans Mono', monospace" font-size="72" font-weight="700" fill="#f1f3f8">Run native</text>
+    <text x="0" y="138" font-family="'DejaVu Sans Mono', monospace" font-size="72" font-weight="700" fill="#f1f3f8">Windows 11</text>
+    <text x="0" y="222" font-family="'DejaVu Sans Mono', monospace" font-size="72" font-weight="700" fill="#4f95ef">on your PS5</text>
+    <text x="2" y="290" font-family="'DejaVu Sans Mono', monospace" font-size="24" fill="#8b96ad">Bare-metal UEFI · Oberon GPU · Wi-Fi 6</text>
+  </g>
+</svg>
