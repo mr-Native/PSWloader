@@ -40,6 +40,31 @@ $script:Errors = 0
 $script:DriversInstalled = 0
 $script:DriversUpToDate = 0
 $script:DriversFailed = 0
+$script:RestartTwice = $false
+
+# v1.0.5: ps5pwr drives the console's power controller (PCI 104D:9107). A runtime restart of that device (what
+# 'pnputil /install' does when the driver package changes) switches the console off at once. When ps5pwr is already
+# bound, the new package is only added and the device is marked for reinstall at the next start (ConfigFlags 0x20),
+# the same way PSWSetup does it. Enum keys are SYSTEM-only, so the flag is written through a one-shot SYSTEM task.
+function Set-ReinstallAtBoot([string]$InstanceId) {
+    $key = "HKLM\SYSTEM\CurrentControlSet\Enum\$InstanceId"
+    $cur = 0
+    try { $cur = [uint32](Get-ItemProperty -LiteralPath "Registry::$key" -Name ConfigFlags -ErrorAction Stop).ConfigFlags } catch { $cur = 0 }
+    $new = [int]($cur -bor 0x20)
+    try {
+        Set-ItemProperty -LiteralPath "Registry::$key" -Name ConfigFlags -Value $new -Type DWord -ErrorAction Stop
+    } catch {
+        $task = 'PSWloader-ReinstallFlag'
+        $cmd = "reg.exe add `"$key`" /v ConfigFlags /t REG_DWORD /d $new /f"
+        schtasks.exe /Create /TN $task /TR $cmd /SC ONCE /ST 00:00 /RU SYSTEM /F | Out-Null
+        schtasks.exe /Run /TN $task | Out-Null
+        Start-Sleep -Seconds 3
+        schtasks.exe /Delete /TN $task /F | Out-Null
+    }
+    $chk = 0
+    try { $chk = [uint32](Get-ItemProperty -LiteralPath "Registry::$key" -Name ConfigFlags -ErrorAction Stop).ConfigFlags } catch { }
+    return (($chk -band 0x20) -ne 0)
+}
 
 function Write-Log {
     param([string]$Level, [string]$Message)
@@ -149,8 +174,16 @@ if (Test-Path $DriversDir) {
     foreach ($inf in $infs) {
         $rel = $inf.FullName.Substring($DriversDir.Length).TrimStart('\')
         LogInfo "  Installing driver: $rel"
+        $pwrDevs = @()
+        if ($inf.Name -ieq 'ps5pwr.inf') {
+            $pwrDevs = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+                Where-Object { @($_.HardwareID) -like 'PCI\VEN_104D&DEV_9107*' -and $_.Service -eq 'ps5pwr' })
+            $newVer = ((Select-String -Path $inf.FullName -Pattern '^\s*DriverVer\s*=\s*[^,]+,\s*([0-9.]+)' | Select-Object -First 1).Matches.Groups[1].Value)
+            $pwrDevs = @($pwrDevs | Where-Object { ($_ | Get-PnpDeviceProperty DEVPKEY_Device_DriverVersion -ErrorAction SilentlyContinue).Data -ne $newVer })
+        }
+        $pnpArgs = if ($pwrDevs.Count) { "/add-driver `"$($inf.FullName)`"" } else { "/add-driver `"$($inf.FullName)`" /install" }
         $p = Start-Process -FilePath "$env:SystemRoot\System32\pnputil.exe" `
-            -ArgumentList "/add-driver `"$($inf.FullName)`" /install" `
+            -ArgumentList $pnpArgs `
             -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput "$env:TEMP\pswupd-pnp-out.txt" `
             -RedirectStandardError "$env:TEMP\pswupd-pnp-err.txt"
@@ -161,7 +194,15 @@ if (Test-Path $DriversDir) {
                 if ($ol.Trim()) { LogInfo "    pnputil: $($ol.Trim())" }
             }
         }
-        if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
+        if (($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010 -or $p.ExitCode -eq 259) -and $pwrDevs.Count) {
+            foreach ($d in $pwrDevs) {
+                if (Set-ReinstallAtBoot $d.InstanceId) { LogOk "  $($d.InstanceId): marked for reinstall at the next start (no device restart now)" }
+                else { $script:Warnings++; LogWarn "  $($d.InstanceId): could not set the reinstall flag - ps5pwr stays on the old version" }
+            }
+            $script:RestartTwice = $true
+            $script:DriversInstalled++
+            LogOk "  Driver $rel staged; it is installed at the next start and loaded at the start after that (restart twice)"
+        } elseif ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
             $script:DriversInstalled++
             LogOk "  Driver $rel installed/updated (exit $($p.ExitCode))"
         } elseif ($p.ExitCode -eq 259) {
@@ -271,6 +312,27 @@ if (Test-Path $ToolsSrc) {
     LogInfo "No tools directory in payload, skipping."
 }
 
+# 5b. v1.0.5: support tool C:\PSWloader\selfcheck (PSWSelfCheck.cmd -> one zip with every log in ...\results)
+$SelfSrc = Join-Path $ToolsSrc 'selfcheck'
+if (Test-Path $SelfSrc) {
+    try {
+        New-Item -ItemType Directory -Path 'C:\PSWloader\selfcheck\results' -Force | Out-Null
+        Copy-Item -Path (Join-Path $SelfSrc '*') -Destination 'C:\PSWloader\selfcheck' -Force
+        LogOk "Installed the support tool to C:\PSWloader\selfcheck"
+        if (Test-Path 'C:\PSWloader\selfcheck\PSWWatch.ps1') {   # background log (C:\PSWloader\logs\watch), at startup and every minute
+            $wa = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+                -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\PSWloader\selfcheck\PSWWatch.ps1"'
+            $wt = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)))
+            $wp = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            $ws = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+            Register-ScheduledTask -TaskName 'PSWloader Watch' -Action $wa -Trigger $wt -Principal $wp -Settings $ws -Force -ErrorAction Stop | Out-Null
+            LogOk "Background log task 'PSWloader Watch' registered (C:\PSWloader\logs\watch)"
+        }
+    } catch {
+        LogWarn "Could not install the support tool: $_"
+    }
+}
+
 # 6. Optional: update UEFI payload on any mounted PSWloader ESP / USB \PSW\ directory
 LogInfo "Step 5/5: Checking for mounted PSWloader firmware directory (\PSW\)..."
 $FwSrc = Join-Path $PayloadDir 'firmware'
@@ -345,6 +407,7 @@ $meta = [ordered]@{
     logFile         = $LogFile
     driversUpdated  = $script:DriversInstalled
     driversUpToDate = $script:DriversUpToDate
+    restartTwice    = $script:RestartTwice
     warnings        = $script:Warnings
     errors          = $script:Errors
 }
@@ -354,6 +417,9 @@ try {
     LogWarn "Could not write $InstalledVersionPath : $_"
 }
 
+if ($script:RestartTwice) {
+    LogInfo "NOTE: the power driver (ps5pwr) is switched at the next start and loaded at the start after that - restart twice."
+}
 LogInfo "============================================================"
 LogInfo "SUMMARY: target=$TargetVersion installed=$($script:DriversInstalled) uptodate=$($script:DriversUpToDate) failed=$($script:DriversFailed) warnings=$($script:Warnings) errors=$($script:Errors)"
 LogInfo "============================================================"

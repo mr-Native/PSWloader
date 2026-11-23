@@ -271,13 +271,14 @@ STATIC EFI_STATUS Ps5DiagWriteInDir(EFI_FILE_PROTOCOL *Root,CONST CHAR8 *Text,UI
 }
 /* Save \PSWloader\logs\PS5DIAG.LOG: prefers any writable FAT32 USB drive (even with random data),
  * falls back to the Windows/config ESP (also writes \PS5DIAG.LOG there for backwards compatibility). */
+STATIC BOOLEAN mPs5DiagEspOnly;   /* r5.25.12: the check at every start writes only to the config/boot ESP, never to other USB drives */
 STATIC EFI_STATUS Ps5DiagSaveLogEx(CONST struct ps5_diag_report *R,unsigned Lang,EFI_HANDLE Fallback,CHAR8 *SavedWhere,UINTN SavedWhereCap) {
   STATIC CHAR8 Text[PS5_DIAG_LOG_MAX];EFI_FILE_PROTOCOL *Root=NULL,*File=NULL;
   STATIC EFI_GUID LogGuid=PS5_DIAG_PROTOCOL_GUID;
   CHAR8 Fw[96];
   (VOID)Lang;
   if(SavedWhere&&SavedWhereCap)SavedWhere[0]='\0';
-  AsciiSPrint(Fw,sizeof(Fw),"PSWloader v1.0.4 (%a), %s rev %x",PS5_FW_RELEASE,gST->FirmwareVendor?gST->FirmwareVendor:L"?",gST->FirmwareRevision);   /* r5.20.7 */
+  AsciiSPrint(Fw,sizeof(Fw),"PSWloader v1.0.5 (%a), %s rev %x",PS5_FW_RELEASE,gST->FirmwareVendor?gST->FirmwareVendor:L"?",gST->FirmwareRevision);   /* r5.20.7 */
   UINTN Len=ps5_diag_format(R,0,Fw,Text,sizeof(Text));
   Len=Ps5DiagAppendPciInventory(Text,sizeof(Text),Len);
   EFI_STATUS V=gRT->SetVariable(PS5_DIAG_LOG_VARIABLE,&LogGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS,Len,Text);   /* gone at ExitBootServices */
@@ -285,7 +286,7 @@ STATIC EFI_STATUS Ps5DiagSaveLogEx(CONST struct ps5_diag_report *R,unsigned Lang
   (VOID)V;
   /* 1. Try any connected writable FAT32 USB drive first */
   EFI_HANDLE *H=NULL;UINTN N=0,I;
-  if(!EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleFileSystemProtocolGuid,NULL,&N,&H))){
+  if(!mPs5DiagEspOnly && !EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleFileSystemProtocolGuid,NULL,&N,&H))){
     for(I=0;I<N;I++){
       if(!Ps5HandleBehindUsb(H[I]))continue;
       Root=Ps5PresetRoot(H[I]);

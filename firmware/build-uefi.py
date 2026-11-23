@@ -328,7 +328,7 @@ def prepare_warm_soft_tick_cpu(root):
     t = t.replace(entry, '  mPs5WarmNoHlt = (*(volatile UINT64 *)(UINTN)0x111806040ULL == 0x314D524157575350ULL);\n' + entry, 1)
     path.write_text(t)
 
-def prepare_warm_soft_tick_timer(root):
+def prepare_warm_soft_tick_timer(root, hw_timer=False):
     """r5.25.6: software timer after a warm re-entry - idle loop and gBS->Stall feed CoreTimerTick."""
     rel = 'OvmfPkg/LocalApicTimerDxe/'
     t = subprocess.check_output(['git', 'show', 'HEAD:' + rel + 'LocalApicTimerDxe.c'], cwd=root, text=True)
@@ -406,6 +406,9 @@ STATIC VOID EFIAPI Ps5SoftRestoreTpl (IN EFI_TPL OldTpl)
 STATIC VOID Ps5SoftTickStart (VOID)
 {
   EFI_EVENT  Idle;
+#if PS5_WARM_HW_TIMER
+  return;   /* r5.25.11 --warm-hw-timer: hardware ticks after a warm re-entry too */
+#endif
   if (*(volatile UINT64 *)(UINTN)0x111806040ULL != 0x314D524157575350ULL) return;   /* cold boot: hardware ticks */
   mPs5SoftLast = GetPerformanceCounter ();
   if (EFI_ERROR (gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_NOTIFY, Ps5SoftIdle, NULL, &mPs5IdleGuid, &Idle))) return;
@@ -431,10 +434,11 @@ STATIC VOID Ps5SoftTickStart (VOID)
     if t.count(hw) != 1: raise RuntimeError('warm soft tick: SetTimerPeriod anchor')
     # r5.25.7 (HW 20.11. lab84 apic state): in a warm run the LAPIC timer is never started - a masked LVT
     # sets no IRR bit, so no stale 0x20 waits for the moment the filter opens at ExitBootServices
-    t = t.replace(hw, '    if (mPs5NoHw || (*(volatile UINT64 *)(UINTN)0x111806040ULL == 0x314D524157575350ULL)) {\n'
+    t = t.replace(hw, '    if (mPs5NoHw || (!PS5_WARM_HW_TIMER && *(volatile UINT64 *)(UINTN)0x111806040ULL == 0x314D524157575350ULL)) {\n'
                       '      DisableApicTimerInterrupt ();   /* r5.25.7: warm run - software ticks only, the LVT stays masked */\n'
                       '      mTimerPeriod = TimerPeriod;\n      return EFI_SUCCESS;\n    }\n' + hw, 1)
-    t = t.replace(inc, inc + 'STATIC BOOLEAN mPs5NoHw;   /* r5.25.7: set for good by Ps5SoftTickStart (warm run) */\n', 1)
+    t = t.replace(inc, inc + 'STATIC BOOLEAN mPs5NoHw;   /* r5.25.7: set for good by Ps5SoftTickStart (warm run) */\n'
+                  + '#define PS5_WARM_HW_TIMER %d   /* r5.25.11: 1 = hardware timer after a warm re-entry as well */\n' % (1 if hw_timer else 0), 1)
     t = t.replace(init, code + init, 1)
     t = t.replace(inst, '  Ps5SoftTickStart ();\n\n' + inst, 1)
     inf = inf.replace(lib, lib + '  TimerLib\n', 1)
@@ -551,6 +555,8 @@ def main():
     parser.add_argument('--warm-probe', type=int, choices=(1, 2, 3, 4, 5, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 61, 62, 63, 65, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79), help='lab: after a warm re-entry switch the console off in the reset driver (1) or in BDS (2); triple fault right before the firmware entry (3) or right after the trampoline dropped the IDT (4); off right before the trampoline (5); 11-16 = GPU-D3 + halt signal at trampoline steps; 21-25 = ICC off at trampoline steps; 31/32 = payload entry start/hand-off to DXE, 33/34 = DXE core start/after all DXE drivers (before BDS); 35/36 = payload entry after the library constructors/after BuildHobs; 37/38 = hand-off before/after the CR3 load; 39 = first line of the DXE core; 40 = unhandled DXE exception: off after (vector + 1) * 10 s; 41 = hand-off after UpdateStackHob (before SwitchStack); 42-44 = BDS ext-APIC step start/after the CPU names/end; 45 = BDS warm record (stand-alone off); 46/47 = before/after PlatformConsoleInit, 48 = AfterConsole start, 49 = after ConnectAll; 50/51 = BDS ext-APIC after the BSP filter opened / after the AP StartupAllAPs; 52 = 8th device interrupt without a handler: off after (vector / 32 + 1) * 10 s; 53 = a ButtonPoll call slower than 0.5 s; 54 = 200th local-APIC timer interrupt; 55/56 = ButtonPoll entered / returned; 57-59 = BDS ext-APIC after the first DEBUG line / after the IER writes / after TPR+EOI; 61 = pending IRR 16..31 (off after (V-15)*10 s) or stale ISR (200 s) before the IER loop; 62 = DXE timer does not fire within 2 s after the IER opening; 63 = at 46 read the config dword 0 of every function, then off; 65 = at 57 wait 60 s (IER still closed), then off; 67 = after the ISR drain, before the timer vector opens; 68 = first entry of the LAPIC timer handler; 69 = int 0x20 before the timer vector opens (software path into the handler); 70 = after the CPU names: all APs ran -> off now, some -> 60 s, none -> 120 s; 71 = at 58 a load square wave on the BSP (no PCIe/ICC); 72 = cli, write the timer IER bit, off; 73 = IF on with IER[0x20] open but TPR 0xF0 for 2 s, then off; 74 = self-IPI 0x21 with own IDT target: off at once = accepted, 30 s = not taken, stays on = acceptance kills; 75 = winload\'s StartupAllAPs: off at its return, or ~120 s (nominal) after its entry if it never returns (stays on = never called); 76 = off at the entry of winload\'s StartupAllAPs; 77 = LAPIC timer one-shot on 0x21 (own IDT target): off at once = a timer interrupt is accepted, after 30 s = not taken (core alive), stays on = the timer interrupt kills; 78 = software int 0x21 into the probe-74 IDT target (off at once = gate/stack fine, the hardware delivery kills); 79 = self-IPI 0x21 on AP 1 (shared IDT, own target): off at once = the AP takes hardware interrupts (BSP-specific killer), after 30 s = AP did not report, stays on = global')
     parser.add_argument('--warm-off-test', action='store_true', help='lab: ResetSystem (cold/warm/platform) switches the console off first - shows whether the OS calls it')
     parser.add_argument('--warm-spin-test', action='store_true', help='lab: ResetSystem (cold/warm/platform) stops the core instead of restarting - shows whether the OS calls it')
+    parser.add_argument('--warm-hw-timer', action='store_true', help='r5.25.11: after a warm re-entry the LAPIC timer and the extended-APIC filter work as on a cold boot (no software tick)')
+    parser.add_argument('--dcn-dump', action='store_true', help='lab: log the DCN (HUBBUB, HUBP0/3) and MMHUB register blocks right before bootmgr (cold vs. warm comparison), read only')
     parser.add_argument('--warm-reentry', action='store_true', help='r5.25.4: a restart (ResetSystem cold/warm) starts the firmware again instead of the ICC reboot to GameOS')
     parser.add_argument('--warm-reset-test', action='store_true', help='lab: restart once through ResetSystem (warm re-entry test)')
     parser.add_argument('--menu-idle-seconds', type=int, default=None, help='r5.4: boot Windows after N s without a key in the setup/boot menu (default 0 = off since r5.25.3)')
@@ -650,6 +656,12 @@ STATIC VOID Ps5WarmBar (UINTN N, UINT32 Color) {
     if args.lab_sandisk:
         lb=root/'UefiPayloadPkg/Library/PlatformBootManagerLib'/'Ps5BootWindows.c'
         lb.write_text('#define PS5_LAB_SANDISK 1\n' + lb.read_text())
+    if args.warm_hw_timer:
+        wh=root/'UefiPayloadPkg/Library/PlatformBootManagerLib'/'Ps5BootWindows.c'
+        wh.write_text('#define PS5_WARM_HW_TIMER 1\n' + wh.read_text())
+    if args.dcn_dump:
+        dd=root/'UefiPayloadPkg/Library/PlatformBootManagerLib'/'Ps5BootWindows.c'
+        dd.write_text('#define PS5_DCN_DUMP 1\n' + dd.read_text())
     if args.warm_ebs_watch:
         args.warm_watchdog = True
         we=root/'UefiPayloadPkg/Library/PlatformBootManagerLib'/'Ps5BootWindows.c'
@@ -742,7 +754,7 @@ STATIC VOID Ps5WarmBar (UINTN N, UINT32 Color) {
         if t.count(a) != 1: raise RuntimeError('warm probe anchor missing in DxeMain.c')
         t = t.replace(a, ('  Ps5WarmProbeOff ();\n' + a) if args.warm_probe == 39 else (a + '  Ps5WarmProbeOff ();\n'), 1)
         dm.write_text('#include "%s"\n' % (HERE / 'ps5-warm-probe.h') + t)
-    prepare_warm_soft_tick_timer(root)   # r5.25.5: regenerates LocalApicTimerDxe.c/.inf from HEAD (replaces the checkout)
+    prepare_warm_soft_tick_timer(root, hw_timer=args.warm_hw_timer)   # r5.25.5: regenerates LocalApicTimerDxe.c/.inf from HEAD (replaces the checkout)
     if args.warm_ebs_steps:
         lt = root / 'OvmfPkg/LocalApicTimerDxe/LocalApicTimerDxe.c'
         lt.write_text('#define PS5_WARM_EBS_STEPS 1\n' + lt.read_text())
@@ -969,10 +981,10 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
         source = source.replace(anchor, anchor + '  LvglLib|LvglPkg/Library/LvglLib/LvglLib.inf\n  LvglThemeLib|LvglPkg/Library/LvglThemeLib/LvglThemeLib.inf\n'
                                 '  LvglUiConfigLib|LvglPkg/Library/LvglUiConfigLib/LvglUiConfigLib.inf\n', 1)
         source += ('\n[PcdsFixedAtBuild]\n  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderTitle|"UEFI Boot Manager"\n'
-                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0.4"\n'
+                   '  gLvglPkgTokenSpaceGuid.PcdLvglAptioHeaderVendor|"PSWloader v1.0.5"\n'
                    # r5.24 (user: one visible name): system table FirmwareVendor + version string (UiApp, Windows)
                    '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"PSWloader"\n'
-                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0.4"\n'
+                   '  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString|L"PSWloader v1.0.5"\n'
                    # r5.7 (menu test 16.11.): safe inner margin (TV/capture overscan cut ~15-20 px on the left)
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameEnabled|TRUE\n'
                    '  gLvglPkgTokenSpaceGuid.PcdLvglCenteredFrameHeightPct|94\n'

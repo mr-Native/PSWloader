@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent
  * Wait for the pinned Windows ESP before boot selection, not after it.
  */
+#ifndef PS5_WARM_LOGCELL
+#define PS5_WARM_LOGCELL 0x111806380ULL   /* r5.25.11: "WARMLOG1" while a warm re-entry runs (host tests point it at a variable) */
+#endif
 #include <Uefi.h>
 #include <Guid/EventGroup.h>
 #include <Protocol/PartitionInfo.h>
@@ -36,8 +39,8 @@ STATIC BOOLEAN mPs5BsTraceWarm;   /* lab: set by Ps5WarmReadRecord on a warm run
 #define PS5_QUIET_SCREEN 1
 #endif
 #define PS5_BRAND_TITLE L"PSWloader"   /* r5.17: product name (user 17.11.2026) */
-#define PS5_BRAND_VERSION L"v1.0.4"
-#define PS5_FW_RELEASE "r5.25.8"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG); bump with every build */
+#define PS5_BRAND_VERSION L"v1.0.5"
+#define PS5_FW_RELEASE "r5.25.12"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG); bump with every build */
 #if PS5_QUIET_SCREEN
 #define PS5_SCREEN(...) do{CHAR16 Ps5Q_[256];UnicodeSPrint(Ps5Q_,sizeof(Ps5Q_),__VA_ARGS__);DEBUG((DEBUG_INFO,"PS5 screen (quiet): %s",Ps5Q_));}while(0)
 #else
@@ -404,6 +407,9 @@ STATIC UINT32 Ps5RootPortOf (EFI_DEVICE_PATH_PROTOCOL *Dp, EFI_DEVICE_PATH_PROTO
 STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
 {
   EFI_HANDLE *Pci=NULL; UINTN N=0; UINT32 Hc=0;
+  /* r5.25.11 (boot timing: 2 x 2 s of the 6.3 s before bootmgr were two sequential power-off pauses): the ports of every
+   * controller are switched off first, then ONE pause of 2 s, then every controller is restarted */
+  EFI_HANDLE CyH[8]; UINT32 CyId[8],CyCap[8],CyPar[8],CyOff[8]; UINTN Cy=0;
   EFI_DEVICE_PATH_PROTOCOL *KeepDp=Keep?DevicePathFromHandle(Keep):NULL;
   if (EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiPciIoProtocolGuid,NULL,&N,&Pci))) return;
   for (UINTN I=0; I<N; I++) {
@@ -465,7 +471,10 @@ STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
       DEBUG((DEBUG_ERROR,"PS5 xHCI %u port %u PORTSC=%x power-cycle=%u\n",Id,P+1,V,(UINT32)PowerCycle));
       if (!PowerCycle || !(V&PS5_XHCI_PORT_POWER) || P+1==KeepPort || ((KeepMask&~ZeroMask)&(1U<<P))) continue;
       if (mPs5CycleOnlyZero && !(ZeroMask&(1U<<P))) continue;   /* r5.25.4: menu entry - only stuck bridges */
-      if ((V&3U)==3U && !(ZeroMask&(1U<<P))) {   /* r5.25.3: connected + enabled, no 0-byte disk: a working device, left alone */
+      /* r5.25.11 (HW 23.11. lab126/127): after a restart from Windows a connected device is NOT known good - Windows
+       * suspended it at shutdown, and a self-powered USB-C hub (keyboard, mouse) then failed every port reset in Windows.
+       * A warm run cycles such ports like a cold boot; the boot medium and working USB disks above stay powered. */
+      if ((V&3U)==3U && !(ZeroMask&(1U<<P)) && *(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL!=0x31474F4C4D524157ULL) {   /* r5.25.3: connected + enabled, no 0-byte disk: a working device, left alone */
         DEBUG((DEBUG_ERROR,"PS5 xHCI %u port %u: device connected and enabled - stays powered\n",Id,P+1)); continue;
       }
       V=(V&PS5_XHCI_PORT_NEUTRAL)&~PS5_XHCI_PORT_POWER;
@@ -475,17 +484,22 @@ STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
     if (!PowerCycle) continue;
     if (Off==0) { DEBUG((DEBUG_ERROR,"PS5 xHCI %u: no port needs a power cycle - controller left running\n",Id)); continue; }   /* r5.25.3 */
     if (ZeroCut) { if (!mPs5CycleTsc) mPs5CycleWant=Ps5UsbWorkingDisks(); mPs5CycleWant+=ZeroCut; mPs5CycleTsc=AsmReadTsc(); }   /* r5.25.3 */
-    // The driver still owns the running controller. Its next start resets the controller, which powers the ports again.
-    gBS->Stall(2000000);
-    EFI_STATUS Stop=gBS->DisconnectController(Pci[I],NULL,NULL);
-    EFI_STATUS Start=gBS->ConnectController(Pci[I],NULL,NULL,TRUE);
-    DEBUG((DEBUG_ERROR,"PS5 xHCI %u power cycle: ports-off=%u stop=%r start=%r\n",Id,Off,Stop,Start));
-    for (UINT32 P=0; P<(Params>>24) && P<32; P++) {   /* r5.25: PORTSC after the restart */
-      UINT32 V=0;
-      if (!EFI_ERROR(Io->Mem.Read(Io,EfiPciIoWidthUint32,0,(Cap&0xffU)+0x400U+0x10U*P,1,&V)))
-        DEBUG((DEBUG_ERROR,"PS5 xHCI %u port %u PORTSC after=%x\n",Id,P+1,V));
-    }
-    PS5_RECOVER_PRINT(L"[xhci%u: port power cycled on %u ports, stop %r, start %r]\r\n",Id,Off,Stop,Start);
+    if (Cy<8) { CyH[Cy]=Pci[I]; CyId[Cy]=Id; CyCap[Cy]=Cap; CyPar[Cy]=Params; CyOff[Cy]=Off; Cy++; }
+  }
+  // The driver still owns the running controller. Its next start resets the controller, which powers the ports again.
+  if (Cy) gBS->Stall(2000000);   /* 2 s as before (HW 23.11. lab133: with 1 s the mouse behind the USB-C hub failed once in 3 restarts) */
+  for (UINTN K=0; K<Cy; K++) {
+    EFI_PCI_IO_PROTOCOL *Io=NULL;
+    EFI_STATUS Stop=gBS->DisconnectController(CyH[K],NULL,NULL);
+    EFI_STATUS Start=gBS->ConnectController(CyH[K],NULL,NULL,TRUE);
+    DEBUG((DEBUG_ERROR,"PS5 xHCI %u power cycle: ports-off=%u stop=%r start=%r\n",CyId[K],CyOff[K],Stop,Start));
+    if (!EFI_ERROR(gBS->HandleProtocol(CyH[K],&gEfiPciIoProtocolGuid,(VOID **)&Io)))
+      for (UINT32 P=0; P<(CyPar[K]>>24) && P<32; P++) {   /* r5.25: PORTSC after the restart */
+        UINT32 V=0;
+        if (!EFI_ERROR(Io->Mem.Read(Io,EfiPciIoWidthUint32,0,(CyCap[K]&0xffU)+0x400U+0x10U*P,1,&V)))
+          DEBUG((DEBUG_ERROR,"PS5 xHCI %u port %u PORTSC after=%x\n",CyId[K],P+1,V));
+      }
+    PS5_RECOVER_PRINT(L"[xhci%u: port power cycled on %u ports, stop %r, start %r]\r\n",CyId[K],CyOff[K],Stop,Start);
   }
   FreePool(Pci);
 }
@@ -528,6 +542,11 @@ STATIC EFI_HANDLE mPs5BootSelected;
 #define PS5_WARM_LASTBOOT 0x111806060ULL
 #endif
 STATIC BOOLEAN mPs5WarmDirect, mPs5WarmDirectHit, mPs5WarmNotified;
+/* r5.25.12 (user: the restart must also work for Windows installed on USB): L[3] of the last-boot record marks a USB boot
+ * device ("PSWUSB1"); a warm run then waits up to 60 s for its target (USB disks and bridges re-enumerate late) */
+#define PS5_WARM_LASTUSB 0x0031425355575350ULL
+#define PS5_WARM_USB_WAIT_ATTEMPTS 600U   /* x 100 ms */
+STATIC BOOLEAN mPs5WarmUsb;
 /* r5.25.5: a warm re-entry that cannot boot its target restarts cold through GameOS (ICC) - no BDS fallback */
 STATIC VOID Ps5WarmColdRestart(CONST CHAR8 *Why)
 {
@@ -655,6 +674,7 @@ STATIC VOID EFIAPI Ps5WarmBeforeEbs(IN EFI_EVENT Event, IN VOID *Context)
 STATIC VOID Ps5WarmReadRecord(VOID)
 {
   volatile UINT64 *R=(volatile UINT64 *)(UINTN)PS5_WARM_RECORD, *L=(volatile UINT64 *)(UINTN)PS5_WARM_LASTBOOT;
+  *(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL=0;   /* r5.25.11: warm-log cell (LogExportDxe: a warm run's snapshots go to \PS5WARM.LOG) */
 #if defined(PS5_WARM_EBS_STEPS)
   *(volatile UINT64 *)(UINTN)0x111806300ULL=0;   /* lab: only a warm run's BeforeExitBootServices publishes the frame buffer */
 #endif
@@ -683,6 +703,7 @@ STATIC VOID Ps5WarmReadRecord(VOID)
 #if defined(PS5_WARM_PROBE) && PS5_WARM_PROBE == 45
   Ps5WarmProbeOff();   /* lab: like 2, but through the stand-alone ICC request (2 depends on the reset driver's device check) */
 #endif
+  *(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL=0x31474F4C4D524157ULL;   /* "WARMLOG1" */
   UINT64 Flags=R[1];
   R[0]=0;
   if(Flags&1) {
@@ -692,9 +713,11 @@ STATIC VOID Ps5WarmReadRecord(VOID)
     DEBUG((DEBUG_ERROR,"PS5 warm re-entry: the OS asked for the firmware UI - opening the Boot Manager\n"));
     return;
   }
+  mPs5WarmUsb=(L[0]==0x315453414C575350ULL && L[3]==PS5_WARM_LASTUSB);   /* r5.25.12 */
   if(Flags&2){CopyMem(&mPs5WarmGuid,(VOID *)&R[2],16);mPs5WarmDirect=TRUE;}
   else if(L[0]==0x315453414C575350ULL){CopyMem(&mPs5WarmGuid,(VOID *)&L[1],16);mPs5WarmDirect=TRUE;}
   DEBUG((DEBUG_ERROR,"PS5 warm re-entry: direct boot of %g (%a)\n",&mPs5WarmGuid,(Flags&2)?"the OS boot entry":"the last boot device"));
+  DEBUG((DEBUG_ERROR,"PS5 warm re-entry: OS request flags %Lx, last boot device %a\n",Flags,mPs5WarmUsb?"USB":"internal"));   /* r5.25.11: see WarmReadOsRequest */
 }
 #ifdef PS5_NATIVE_SETUP
 /* r5.6 (16.11., user request): power preset persistence. \PS5POWER.CFG on the boot ESP, plain text
@@ -768,20 +791,22 @@ STATIC VOID Ps5PowerPresetLoad(EFI_HANDLE Esp) {
   CHAR8 *Lang=mPs5Set.lang==1?"de-DE":"en-US";
   mPs5LangDe=mPs5Set.lang==1;   /* r5.17: start screen language */
   { UINT32 Fb=mPs5Set.fastboot; mPs5FastBoot=Fb; gRT->SetVariable(L"Ps5FastBoot",&mPs5PresetGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Fb),&Fb); }
+  { UINT32 Fr=mPs5Set.fastrestart; gRT->SetVariable(L"Ps5FastRestart",&mPs5PresetGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Fr),&Fr); }   /* r5.25.12 */
   { UINT32 Uc=mPs5Set.usbcycle; gRT->SetVariable(L"Ps5UsbCycle",&mPs5PresetGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Uc),&Uc); }   /* r5.25.1 */
   { UINT32 Bo=mPs5Set.bootorder; gRT->SetVariable(L"Ps5BootOrder",&mPs5PresetGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Bo),&Bo); }   /* r5.15 */
   { UINT32 Rv=mPs5Set.refresh; gRT->SetVariable(L"Ps5Refresh",&mPs5PresetGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Rv),&Rv); }   /* r5.16 */
   { UINT32 Pv=mPs5Set.pstates; gRT->SetVariable(L"Ps5PStates",&mPs5PresetGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Pv),&Pv); }   /* r5.12 */
   { PS5_LANG Lv; Lv.Lang=mPs5Set.lang; gRT->SetVariable(L"Ps5Lang",&mPs5PresetGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Lv),&Lv); }
   EFI_STATUS L=gRT->SetVariable(L"PlatformLang",&gEfiGlobalVariableGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS|EFI_VARIABLE_NON_VOLATILE,AsciiStrSize(Lang),Lang);
-  DEBUG((DEBUG_ERROR,"PS5 settings: %a preset=%a lang=%a fastboot=%u pstates=%u (variable %r, PlatformLang %r)\n",From,ps5_set_preset[mPs5Set.preset],
-    ps5_set_lang[mPs5Set.lang],mPs5Set.fastboot,mPs5Set.pstates,S,L));
+  DEBUG((DEBUG_ERROR,"PS5 settings: %a preset=%a lang=%a fastboot=%u fastrestart=%u pstates=%u (variable %r, PlatformLang %r)\n",From,ps5_set_preset[mPs5Set.preset],
+    ps5_set_lang[mPs5Set.lang],mPs5Set.fastboot,mPs5Set.fastrestart,mPs5Set.pstates,S,L));
 }
 STATIC EFI_STATUS Ps5PowerPresetSave(EFI_HANDLE Esp) {
   PS5_POWER_PRESET V;UINTN VSize=sizeof(V);CHAR8 Lang[8];UINTN LSize=sizeof(Lang);
   if(!EFI_ERROR(gRT->GetVariable(L"Ps5PowerPreset",&mPs5PresetGuid,NULL,&VSize,&V)) && VSize==sizeof(V) && V.Preset<=2)mPs5Set.preset=V.Preset;
   if(!EFI_ERROR(gRT->GetVariable(L"PlatformLang",&gEfiGlobalVariableGuid,NULL,&LSize,Lang)) && LSize>=3)mPs5Set.lang=(Lang[0]=='d' && Lang[1]=='e')?1:0;
   { UINT32 Fb=0;UINTN Fs=sizeof(Fb); if(!EFI_ERROR(gRT->GetVariable(L"Ps5FastBoot",&mPs5PresetGuid,NULL,&Fs,&Fb)) && Fs==sizeof(Fb))mPs5Set.fastboot=Fb?1:0; }
+  { UINT32 Fr=0;UINTN Frs=sizeof(Fr); if(!EFI_ERROR(gRT->GetVariable(L"Ps5FastRestart",&mPs5PresetGuid,NULL,&Frs,&Fr)) && Frs==sizeof(Fr))mPs5Set.fastrestart=Fr?1:0; }   /* r5.25.12 */
   { UINT32 Uc=0;UINTN Us=sizeof(Uc); if(!EFI_ERROR(gRT->GetVariable(L"Ps5UsbCycle",&mPs5PresetGuid,NULL,&Us,&Uc)) && Us==sizeof(Uc))mPs5Set.usbcycle=Uc?1:0; }   /* r5.25.1 */
   { UINT32 Bo=0;UINTN Bs=sizeof(Bo); if(!EFI_ERROR(gRT->GetVariable(L"Ps5BootOrder",&mPs5PresetGuid,NULL,&Bs,&Bo)) && Bs==sizeof(Bo))mPs5Set.bootorder=Bo?1:0; }   /* r5.15 */
   { UINT32 Rv=0;UINTN Rs=sizeof(Rv); if(!EFI_ERROR(gRT->GetVariable(L"Ps5Refresh",&mPs5PresetGuid,NULL,&Rs,&Rv)) && Rs==sizeof(Rv))mPs5Set.refresh=Rv?1:0; }   /* r5.16 */
@@ -809,7 +834,7 @@ STATIC EFI_STATUS Ps5PowerPresetSave(EFI_HANDLE Esp) {
   }
   if(mPs5Set.bootlist_n==mPs5SetFile.bootlist_n && CompareMem(mPs5Set.bootlist,mPs5SetFile.bootlist,mPs5Set.bootlist_n*sizeof(unsigned))==0 &&
      mPs5Set.preset==mPs5SetFile.preset && mPs5Set.lang==mPs5SetFile.lang && mPs5Set.fastboot==mPs5SetFile.fastboot && mPs5Set.pstates==mPs5SetFile.pstates &&
-     mPs5Set.bootorder==mPs5SetFile.bootorder && mPs5Set.refresh==mPs5SetFile.refresh && mPs5Set.diag==mPs5SetFile.diag && mPs5Set.usbcycle==mPs5SetFile.usbcycle)return EFI_SUCCESS;              /* unchanged: no ESP write */
+     mPs5Set.bootorder==mPs5SetFile.bootorder && mPs5Set.refresh==mPs5SetFile.refresh && mPs5Set.diag==mPs5SetFile.diag && mPs5Set.usbcycle==mPs5SetFile.usbcycle && mPs5Set.fastrestart==mPs5SetFile.fastrestart)return EFI_SUCCESS;              /* unchanged: no ESP write */
   EFI_FILE_PROTOCOL *Root=Ps5PresetRoot(Esp),*File=NULL;
   if(Root==NULL)return EFI_NOT_FOUND;
   CHAR8 Text[640],Back[768];UINTN Size=ps5_settings_format(&mPs5Set,Ps5SetCrc,Text,sizeof(Text));   /* r5.20.2: + PS5_SET_EXTRA; r5.21: + bootlist */
@@ -1007,9 +1032,42 @@ STATIC VOID EFIAPI Ps5DiagMark(CONST CHAR8 *Fmt,...);   /* r5.20.4: \PS5DSTEP.TX
 #endif
 /* r5.4 (16.11.): post-menu Windows launch, shared by the normal BDS path and the setup-browser
  * boot-now protocol ("Boot Windows" / menu idle timeout). Returns only if bootx64.efi returned. */
+/* r5.25.11 (HW 23.11. lab128: after a restart the console's xHCI never completed a port reset in Windows, keyboard and
+ * mouse missing): the warm PCI replay sets the MSI-X function mask on every MSI-X function (no stray interrupts during
+ * the firmware run), and Windows' pci.sys keeps that bit when it enables MSI-X - every vector stays masked. Before the OS
+ * starts, a warm run puts such functions back to the fresh state (MSI-X off, mask clear); Windows enables them itself.
+ * The firmware drivers poll and do not use MSI-X. Raw ECAM, like the replay; bounded capability walk. */
+STATIC VOID Ps5WarmMsixUnmask(VOID)
+{
+  if(*(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL!=0x31474F4C4D524157ULL)return;   /* cold boot: the hand-over state as is */
+  UINTN Fixed=0;
+  for(UINT32 I=0;I<0x8000;I++) {
+    volatile UINT8 *C=(volatile UINT8 *)(UINTN)(0xF0000000ULL+((UINT64)I<<12));
+    if(*(volatile UINT32 *)C==0xFFFFFFFFU || !(*(volatile UINT16 *)(C+6)&BIT4))continue;   /* absent or no capability list */
+    UINT8 Cap=C[0x34]&0xFC;
+    for(UINTN K=0;K<48 && Cap>=0x40;K++) {
+      if(C[Cap]==0x11) {
+        UINT16 Ctl=*(volatile UINT16 *)(C+Cap+2);
+        if(Ctl!=0xFFFF && (Ctl&BIT14)) { *(volatile UINT16 *)(C+Cap+2)=(UINT16)(Ctl&~(BIT15|BIT14)); Fixed++;
+          DEBUG((DEBUG_ERROR,"PS5 warm MSI-X: %02x:%02x.%x %08x ctl %04x -> %04x\n",I>>8,(I>>3)&0x1F,I&7,*(volatile UINT32 *)C,Ctl,*(volatile UINT16 *)(C+Cap+2))); }
+        break;
+      }
+      Cap=C[Cap+1]&0xFC;
+    }
+  }
+  DEBUG((DEBUG_ERROR,"PS5 warm MSI-X: %u function(s) back to the fresh state\n",(UINT32)Fixed));
+}
 STATIC EFI_STATUS Ps5LaunchWindows(EFI_HANDLE Selected)
 {
   EFI_STATUS Status;
+  Ps5WarmMsixUnmask();   /* r5.25.11 */
+  { /* r5.25.11: memory type of the GOP frame buffer, cold vs. warm (after a restart the firmware's writes stay invisible
+     * while the CPU reads them back - suspected write-back caching): variable MTRRs, read only */
+    UINT64 Cap=AsmReadMsr64(0xFE),Def=AsmReadMsr64(0x2FF); UINTN Vc=(UINTN)(Cap&0xFF);
+    DEBUG((DEBUG_ERROR,"PS5 mtrr: cap %Lx def %Lx\n",Cap,Def));
+    for(UINTN V=0;V<Vc && V<16;V++){UINT64 B=AsmReadMsr64(0x200+2*V),M=AsmReadMsr64(0x201+2*V);
+      if(M&BIT11)DEBUG((DEBUG_ERROR,"PS5 mtrr %u: base %Lx mask %Lx\n",(UINT32)V,B,M));}
+  }
 #if defined(PS5_WARM_WATCHDOG)
   Ps5WarmProgress(50);   /* lab: ends the warm watchdog before bootmgr */
 #endif
@@ -1024,6 +1082,36 @@ STATIC EFI_STATUS Ps5LaunchWindows(EFI_HANDLE Selected)
         A[0x480/4],A[0x490/4],A[0x4A0/4],A[0x4B0/4],A[0x4C0/4],A[0x4D0/4],A[0x4E0/4],A[0x4F0/4],A[0x170/4],A[0x270/4]));
     }
   }
+#if defined(PS5_DCN_DUMP) && defined(PS5_NATIVE_DP_VIDEO)
+  { /* lab --dcn-dump (22.11., v2): display/MMHUB registers right before bootmgr, read only, cold vs. warm comparison.
+     * v1 read whole DCN blocks and stalled the bus (HW lab117: hang at the console clear) - v2 reads only registers the
+     * firmware itself programs (the active mode's pipe replay, the MMHUB windows) plus MMHUB VM context 0. */
+    STATIC CONST UINT32 Mm[]={0x69a00,0x69a04,0x69a08,0x69a20,0x69a24,0x69a30,0x69a3c,0x69a40,0x69a60,0x69a84,0x69b00,0x69b04,
+      0x69cac,0x69cb0,0x69d2c,0x69d30,0x69dac,0x69db0,0x6a15c,0x6a160,0x6a164,0x6a180,0x6a184,0x6a188,0x6a1b0,0x6a1b4,0x6a1b8,
+      0x6a1bc,0x6a1c0,0x6a1c4,0x6a1c8,0x6a1cc,0xa600,0xa604,0xa608,0xa60c,0xa610,0xa614,0xa618};
+    CONST struct ps5_dcn201_mode_replay *Rp=Ps5ModeReplay(mPs5ModeId);
+    EFI_HANDLE *Hs=NULL;UINTN Hn=0;
+    if(Rp!=NULL && !EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiPciIoProtocolGuid,NULL,&Hn,&Hs))) {
+      for(UINTN I=0;I<Hn;I++) {
+        EFI_PCI_IO_PROTOCOL *Pci=NULL;UINT32 Id=0;
+        if(EFI_ERROR(gBS->HandleProtocol(Hs[I],&gEfiPciIoProtocolGuid,(VOID **)&Pci)) ||
+           EFI_ERROR(Pci->Pci.Read(Pci,EfiPciIoWidthUint32,0,1,&Id)) || (Id&0xFFFF)!=0x1002 || (Id>>16)!=0x13FC)continue;
+        DEBUG((DEBUG_ERROR,"PS5 dcn dump: start (%a) replay %u + mmhub %u\n",mPs5WarmDirectHit?"warm":"cold",Rp->count,(UINT32)(sizeof(Mm)/sizeof(Mm[0]))));
+        UINTN N=Rp->count+sizeof(Mm)/sizeof(Mm[0]);
+        for(UINTN K0=0;K0<N;K0+=8) {
+          UINT32 O[8],V[8];
+          for(UINTN K=0;K<8;K++){UINTN X=K0+K;O[K]=X<N?(X<Rp->count?Rp->rows[X].offset:Mm[X-Rp->count]):0;V[K]=0;
+            if(O[K] && EFI_ERROR(Pci->Mem.Read(Pci,EfiPciIoWidthUint32,5,O[K],1,&V[K])))V[K]=0xDEADDEAD;}
+          DEBUG((DEBUG_ERROR,"PS5 dcn %x=%x %x=%x %x=%x %x=%x %x=%x %x=%x %x=%x %x=%x\n",O[0],V[0],O[1],V[1],O[2],V[2],O[3],V[3],
+                 O[4],V[4],O[5],V[5],O[6],V[6],O[7],V[7]));
+        }
+        DEBUG((DEBUG_ERROR,"PS5 dcn dump: end\n"));
+        break;
+      }
+      FreePool(Hs);
+    }
+  }
+#endif
 #ifdef PS5_WARM_RESET_TEST
   { /* lab build (--warm-reset-test): the first boot restarts itself once through ResetSystem; the warm re-entry must bring
      * back the start screen and this boot then continues. Marker in the loader's reserved arena (kept by the re-entry). */
@@ -1046,7 +1134,8 @@ STATIC EFI_STATUS Ps5LaunchWindows(EFI_HANDLE Selected)
   { EFI_PARTITION_INFO_PROTOCOL *Pi=NULL;   /* r5.25.4: last boot device for a direct start after a restart */
     if(!EFI_ERROR(gBS->HandleProtocol(Selected,&gEfiPartitionInfoProtocolGuid,(VOID **)&Pi)) && Pi!=NULL && Pi->Type==PARTITION_TYPE_GPT) {
       volatile UINT64 *L=(volatile UINT64 *)(UINTN)PS5_WARM_LASTBOOT;
-      CopyMem((VOID *)&L[1],&Pi->Info.Gpt.UniquePartitionGUID,16); L[0]=0x315453414C575350ULL;
+      CopyMem((VOID *)&L[1],&Pi->Info.Gpt.UniquePartitionGUID,16); L[3]=Ps5HandleBehindUsb(Selected)?PS5_WARM_LASTUSB:0;   /* r5.25.12 */
+      L[0]=0x315453414C575350ULL;
     } }
   Ps5PowerPresetSave(mPs5ConfigEsp?mPs5ConfigEsp:Selected);      /* r5.6: only if changed in the menu; r5.15.2: config ESP */
   Ps5InstallPStateSsdt();                                        /* r5.12: only with pstates=1 */
@@ -1257,11 +1346,26 @@ STATIC VOID Ps5DiagOnceStep(UINT32 Index,UINT32 Count,CONST CHAR8 *Name)
   ConsoleSnapshot();
 }
 STATIC VOID Ps5DiagOnceSub(CONST CHAR8 *What) { Ps5DiagMark("  sub %a",What); }   /* r5.20.4: before single risky reads */
+STATIC VOID Ps5DiagAutoStep(UINT32 Index,UINT32 Count,CONST CHAR8 *Name)
+{
+  DEBUG((DEBUG_ERROR,"PS5 diag: step %u/%u %a %a\n",Index&0x7FFFFFFFu,Count,Name,(Index&0x80000000u)?"done":"begin"));
+}
 STATIC VOID Ps5DiagOnce(EFI_HANDLE Selected)
 {
   STATIC struct ps5_diag_report R;
   BOOLEAN Full=mPs5Set.diag==3;                     /* r5.20.6: diag=full = with the ICC fan/temperature step */
-  if(mPs5Set.diag!=1 && !Full)return;
+  if(mPs5Set.diag!=1 && !Full) {
+    /* r5.25.12: \PS5DIAG.LOG is written at every start, so a support request always has a current one: the quick check
+     * (no ICC step, nothing on the screen), log on the config ESP (or the boot ESP), never on other USB drives */
+    PS5_TS("diag-begin");
+    Ps5DiagRunEx(&R,TRUE,Ps5DiagAutoStep);
+    mPs5DiagEspOnly=TRUE;
+    EFI_STATUS S=Ps5DiagSaveLog(&R,mPs5Set.lang==1,Selected);
+    mPs5DiagEspOnly=FALSE;
+    DEBUG((DEBUG_ERROR,"PS5 diag: start check %u PASS %u WARN %u FAIL %u SKIP, \\PS5DIAG.LOG %r\n",R.pass,R.warn,R.fail,R.skip,S));
+    PS5_TS("diag-end");
+    return;
+  }
   mPs5DiagMarkEsp=mPs5ConfigEsp?mPs5ConfigEsp:Selected;
   mPs5DiagMarkOn=TRUE;
   Ps5DiagMark("0 diag=%a seen, variant %u, firmware %a",Full?"full":"once",(UINT32)PS5_DIAG_ONCE_VARIANT,PS5_FW_RELEASE);
@@ -1690,12 +1794,24 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
       if (T!=NULL) {
         Selected=T; ListDecided=TRUE; mPs5WarmDirectHit=TRUE;
         if (!mPs5WarmNotified) { mPs5WarmNotified=TRUE; DEBUG((DEBUG_ERROR,"PS5 warm re-entry: target found - booting it directly\n")); }
-      } else if (Attempt<PS5_BOOTLIST_WAIT_ATTEMPTS) {
-        if (Attempt%20==10) EfiBootManagerConnectAll();
-        Selected=NULL;
       } else {
-        mPs5WarmDirect=FALSE; DEBUG((DEBUG_ERROR,"PS5 warm re-entry: target not found in 10 s - normal start\n"));
-        Ps5WarmColdRestart("target not found in 10 s");
+        /* r5.25.12: 10 s for an internal target, 60 s for a USB one; after usbpowercycle (it restarts the controller, the
+         * chosen USB disk re-enumerates) the time counts from the cycle, not from the start of the search */
+        UINTN Limit=mPs5WarmUsb?PS5_WARM_USB_WAIT_ATTEMPTS:PS5_BOOTLIST_WAIT_ATTEMPTS;
+#ifdef PS5_NATIVE_SETUP
+        if (CycleDone && CycleAt+PS5_WARM_USB_WAIT_ATTEMPTS>Limit) Limit=CycleAt+PS5_WARM_USB_WAIT_ATTEMPTS;
+        if (mPs5WarmUsb && Attempt==50 && mPs5CycleTsc==0) {   /* target still missing after 5 s: a bridge stuck at 0 bytes? */
+          mPs5CycleOnlyZero=TRUE; mRecoverSilent=TRUE; Ps5UsbRecover(TRUE,NULL); mRecoverSilent=FALSE; mPs5CycleOnlyZero=FALSE;
+          if (mPs5CycleTsc!=0) DEBUG((DEBUG_ERROR,"PS5 warm re-entry: USB target missing after 5 s - power-cycled a stuck USB bridge\n"));
+        }
+#endif
+        if (Attempt<Limit) {
+          if (Attempt%20==10) EfiBootManagerConnectAll();
+          Selected=NULL;
+        } else {
+          mPs5WarmDirect=FALSE; DEBUG((DEBUG_ERROR,"PS5 warm re-entry: target not found after %u s - normal start\n",(UINT32)(Attempt/10)));
+          Ps5WarmColdRestart("target not found");
+        }
       }
     } else if (BootListN) {
       for (UINTN V=0; V<VolN; V++) {
@@ -1818,13 +1934,20 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
        * the 3 s countdown starts at the earliest 1.5 s after the mode start (only when the countdown is shown). */
       /* r5.17: the start screen is always shown now (fastboot only shortens it); the Dell at 3440x1440@100 (scrambled
        * TMDS + sink re-sync) needs clearly longer than 1.5 s, so 5 s lead above 340 MHz. */
-      if(mPs5FrameTsc0) {
+      /* r5.25.12 (user): after a Windows restart the start screen is shown like at power-on (3 or 15 s); with
+       * fastrestart=1 ("Fast restart" under Fast boot) it is skipped, and so is the monitor lead before it */
+      BOOLEAN SkipScreen=mPs5WarmDirectHit && mPs5Set.fastrestart;
+      if(mPs5FrameTsc0 && !SkipScreen) {
         UINT64 Lead=ps5_display_modes[mPs5ModeId].t.clock_khz>340000U?5ULL*PS5_FRAME_TSC_HZ:(3ULL*PS5_FRAME_TSC_HZ)/2;
         while(AsmReadTsc()-mPs5FrameTsc0<Lead)gBS->Stall(10000);
       }
 #endif
       PS5_TS("setup-window-begin");
-      EFI_STATUS SetupStatus=mPs5WarmDirectHit?EFI_SUCCESS:Ps5NativeSetupWindow(NULL);   /* r5.25.4: no start screen after a restart */
+#ifndef PS5_NATIVE_DP_VIDEO
+      BOOLEAN SkipScreen=mPs5WarmDirectHit && mPs5Set.fastrestart;
+#endif
+      if(mPs5WarmDirectHit) DEBUG((DEBUG_ERROR,"PS5 warm re-entry: start screen %a (fastrestart=%u)\n",SkipScreen?"skipped":"shown",mPs5Set.fastrestart));
+      EFI_STATUS SetupStatus=SkipScreen?EFI_SUCCESS:Ps5NativeSetupWindow(NULL);   /* r5.25.12: was always skipped after a restart (r5.25.4) */
       PS5_TS("setup-window-end");
       if(EFI_ERROR(SetupStatus)) {
         DEBUG((DEBUG_ERROR,"PS5 native setup: prerequisites failed %r; stopping before OS boot\n",SetupStatus));

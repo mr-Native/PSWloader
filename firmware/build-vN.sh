@@ -53,6 +53,8 @@ FLAGS=(
   --exception-power-telemetry
   --entry-power-telemetry
   --entry-power-stage exception-only
+  --warm-reentry
+  --warm-hw-timer
 )
 
 # Extra flags per variant (e.g. EXTRA_FLAGS=--m2-overlay for N4); empty = exactly the pinned flags.

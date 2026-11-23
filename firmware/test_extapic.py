@@ -14,7 +14,7 @@ class ExtApic(unittest.TestCase):
     def test_ier_written_while_ierEn_set_then_tpr_eoi(self):
         body = H[H.index('Ps5ExtApicOpenIer ('):]
         guard = body.index('(mPs5ExtApic.Ectrl & BIT0) == 0')
-        loop = body.index('PS5_XAPIC (Base, 0x480 + 0x10 * Index) = 0xFFFFFFFFU', body.index('} else {', body.index('0x480 + 0x10 * 1) |= 0x1U')))
+        loop = body.index('PS5_XAPIC (Base, 0x480 + 0x10 * Index) = 0xFFFFFFFFU', body.index('} else', body.index('0x480 + 0x10 * 1) |= 0x1U')))   # r5.25.11: '} else' and '{' split by the PS5_WARM_HW_TIMER guard
         self.assertLess(guard, loop)
         # r5.25.5: a stale-ISR drain (EOIs + TPR 0) may precede the loop; after the loop TPR then EOI again
         self.assertLess(loop, body.index('PS5_XAPIC (Base, 0x80) = 0', loop))

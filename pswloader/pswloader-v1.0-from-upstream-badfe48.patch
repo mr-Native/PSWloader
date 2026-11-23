@@ -1,5 +1,5 @@
---- a/include/utils.h	2026-10-31 16:31:19.000000000 +0100
-+++ b/include/utils.h	2026-11-22 00:13:08.152995325 +0100
+--- a/include/utils.h
++++ b/include/utils.h
 @@ -150,6 +150,7 @@
  int pin_to_first_available_core(void);
  void unpin(void);
@@ -8,16 +8,22 @@
  void notify_internal(uint8_t *msg);
  void enter_rest_mode(void);
  
---- a/source/loader.c	2026-10-31 16:31:19.000000000 +0100
-+++ b/source/loader.c	2026-11-22 00:23:00.401181868 +0100
-@@ -11,51 +11,24 @@
+--- a/source/loader.c
++++ b/source/loader.c
+@@ -1,5 +1,4 @@
+ #include "loader.h"
+-#include "bluetooth.h"
+ #include "config.h"
+ #include "firmware.h"
+ #include "linux.h"
+@@ -12,51 +11,24 @@
  #include <sys/stat.h>
  
  const char *file_paths[] = {
 -    "/mnt/usb0/",           "/mnt/usb1/",           "/mnt/usb2/",
 -    "/mnt/usb3/",           "/mnt/usb0/PS5/Linux/", "/mnt/usb1/PS5/Linux/",
 -    "/mnt/usb2/PS5/Linux/", "/mnt/usb3/PS5/Linux/",
-+    /* PSWloader v1.0.3: internal storage first, then USB; the older layouts follow so existing installs still start */
++    /* PSWloader v1.0.2: internal storage first, then USB; the older layouts follow so existing installs still start */
 +    "/data/pswloader/",
 +    "/mnt/usb0/PSW/",
 +    "/mnt/usb1/PSW/",
@@ -74,7 +80,7 @@
    return filename;
  }
  
-@@ -99,12 +72,18 @@
+@@ -100,12 +72,18 @@
  }
  
  int read_file(const char *path, void *buf, size_t bufsize) {
@@ -97,7 +103,7 @@
  }
  
  void trim_newline(char *s) {
-@@ -117,56 +96,78 @@
+@@ -118,59 +96,143 @@
    }
  }
  
@@ -119,6 +125,24 @@
 +);
 +extern const unsigned char _psw_kernel_start[], _psw_kernel_end[];
 +extern const unsigned char _psw_upl_start[], _psw_upl_end[];
++
++/* v1.0.5: version of a PSWloader firmware image = the patch number in its UTF-16 string "PSWloader v1.0.N"
++ * ("PSWloader v1.0" alone = 0); -1 if the image carries no such string (unknown build, left alone). */
++static int psw_fw_version(const unsigned char *b, size_t n) {
++  static const char tag[] = "PSWloader v1.0";
++  size_t tl = sizeof(tag) - 1;
++  for (size_t i = 0; i + 2 * tl + 4 <= n; i++) {
++    size_t k = 0;
++    while (k < tl && b[i + 2 * k] == (unsigned char)tag[k] && b[i + 2 * k + 1] == 0) k++;
++    if (k != tl) continue;
++    size_t j = i + 2 * tl;
++    if (b[j] != '.' || b[j + 1] != 0) return 0;
++    int v = 0, d = 0;
++    for (j += 2; j + 1 < n && b[j] >= '0' && b[j] <= '9' && b[j + 1] == 0 && d < 4; j += 2, d++) v = v * 10 + (b[j] - '0');
++    return d ? v : 0;
++  }
++  return -1;
++}
 +
  int fetch_linux(struct linux_info *info) {
    char bzimage_path[256];
@@ -163,6 +187,7 @@
 -      read_file(initrd_path, initrd, ALIGN_UP(initrd_size, PAGE_SIZE));
 -  if (initrd_size < 0) {
 -    notify("Something went wrong while reading initrd - Aborting\n");
+-    return -1;
 +  /* v1.0.4: external files in /data/pswloader/ or USB PSW/ override if present; otherwise use embedded firmware so
 +   * PSWloader.elf always starts standalone (even with an NTFS-only USB stick or no USB stick at all). */
 +  long bzimage_length = find_and_get_size_of_file("pswloader-kernel.bin", bzimage_path);
@@ -172,16 +197,43 @@
 +
 +  int use_emb_kernel = (bzimage_length < 0);
 +  int use_emb_upl = (initrd_length < 0);
++  /* v1.0.5: an external firmware OLDER than the built-in one (left in /data/pswloader/ or on a USB PSW/ folder by an
++   * earlier install) is skipped - kernel and UEFI firmware are taken from this ELF as a pair. */
++  if (!use_emb_upl && initrd_length >= 4096 && initrd_length <= 16 * 1024 * 1024) {
++    size_t tl = (size_t)initrd_length;
++    void *tmp = mmap(NULL, ALIGN_UP(tl, PAGE_SIZE), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++    if (tmp != MAP_FAILED) {
++      if (read_file(initrd_path, tmp, tl) == (int)tl) {
++        int ev = psw_fw_version(tmp, tl), bv = psw_fw_version(_psw_upl_start, (size_t)(_psw_upl_end - _psw_upl_start));
++        if (ev >= 0 && bv >= 0 && ev < bv) {
++          notify("PSWloader: older firmware v1.0.%d in %s ignored, using the built-in v1.0.%d\n", ev, initrd_path, bv);
++          use_emb_upl = 1; use_emb_kernel = 1;
++        }
++      }
++      munmap(tmp, ALIGN_UP(tl, PAGE_SIZE));
++    }
+   }
 +  if (use_emb_kernel) bzimage_length = (long)(_psw_kernel_end - _psw_kernel_start);
 +  if (use_emb_upl) initrd_length = (long)(_psw_upl_end - _psw_upl_start);
-+
+ 
+-  if (dump_device_firmwares(initrd_path) < 0) {
+-    notify(
+-        "Something went wrong while dumping device firmwares - Continuing\n");
 +  if (bzimage_length < 2048 + 512 || bzimage_length > 16 * 1024 * 1024 ||
 +      initrd_length < 4096 || initrd_length > 16 * 1024 * 1024) {
 +    notify("PSWloader: firmware files missing or invalid; aborting\n");
 +    return -1;
 +  }
 +  size_t bzimage_size = (size_t)bzimage_length;
-+  size_t initrd_size = (size_t)initrd_length;
++  size_t upl_size = (size_t)initrd_length;
++  size_t wfw_size = 0;
++  size_t wfw_total = 0;
++  if (env_offset.PS5_WIFI_FW_OFFSET != 0 && env_offset.PS5_WIFI_FW_SIZE >= 0x1000 &&
++      env_offset.PS5_WIFI_FW_SIZE <= 0x100000) {
++    wfw_size = (size_t)env_offset.PS5_WIFI_FW_SIZE;
++    wfw_total = ALIGN_UP((size_t)16 + wfw_size, PAGE_SIZE);
++  }
++  size_t initrd_size = wfw_total ? (ALIGN_UP(upl_size, PAGE_SIZE) + wfw_total) : upl_size;
 +  void *bzimage = mmap(NULL, ALIGN_UP(bzimage_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
 +                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 +  if (bzimage == MAP_FAILED) return -1;
@@ -196,9 +248,9 @@
 +    return -1;
 +  }
 +  if (use_emb_upl) {
-+    memcpy(initrd, _psw_upl_start, initrd_size);
-+    printf("PSWloader: using embedded pswloader-upl.bin (%zu bytes)\n", initrd_size);
-+  } else if (read_file(initrd_path, initrd, initrd_size) != (int)initrd_size) {
++    memcpy(initrd, _psw_upl_start, upl_size);
++    printf("PSWloader: using embedded pswloader-upl.bin (%zu bytes)\n", upl_size);
++  } else if (read_file(initrd_path, initrd, upl_size) != (int)upl_size) {
 +    notify("PSWloader: firmware files could not be read completely; aborting\n");
 +    return -1;
 +  }
@@ -209,19 +261,39 @@
 +      body != (bzimage_size - 2048) / 16 || (bzimage_size - 2048) % 16 ||
 +      memcmp(initrd, "PS5UPL01", 8)) {
 +    notify("PSWloader: firmware file has an unexpected format; aborting\n");
-     return -1;
++    return -1;
++  }
++  /* Append console's own IW620 Wi-Fi firmware inside the initrd buffer right after
++   * the page-aligned UPL ("PS5WFW01" + size + crc32) so both 11.60 alias staging
++   * and all other firmware wake copies carry it into the UEFI reserved arena. */
++  if (wfw_total) {
++    uint8_t *wbuf = (uint8_t *)initrd + ALIGN_UP(upl_size, PAGE_SIZE);
++    uint32_t wsize = (uint32_t)wfw_size;
++    memset(wbuf, 0, wfw_total);
++    memcpy(wbuf, "PS5WFW01", 8);
++    memcpy(wbuf + 8, &wsize, 4);
++    kread(get_offset_va(env_offset.PS5_WIFI_FW_OFFSET), wbuf + 16, wsize);
++    uint32_t crc = 0xFFFFFFFFu;
++    for (uint32_t k = 0; k < wsize; k++) {
++      crc ^= wbuf[16 + k];
++      for (int b = 0; b < 8; b++)
++        crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
++    }
++    crc = ~crc;
++    memcpy(wbuf + 12, &crc, 4);
++    printf("PSWloader: staged PS5 Wi-Fi firmware (%u bytes, crc=%08x)\n", wsize, crc);
    }
--
--  if (dump_device_firmwares(initrd_path) < 0) {
--    notify(
--        "Something went wrong while dumping device firmwares - Continuing\n");
--  }
 +  /* No dump_device_firmwares: the firmware files are inputs, not Linux firmware output. */
+ 
+-  if (dump_bluetooth_pairings(initrd_path) < 0)
+-    notify("Could not export Bluetooth pairings - Continuing\n");
++  /* PSWloader: no Bluetooth pairing export - it writes next to the Linux initrd (Linux only), and with the built-in
++   * firmware there is no initrd path at all */
  
    size_t vram_size;
    char buf_vram[16] = {};
---- a/source/main.c	2026-10-31 16:31:19.000000000 +0100
-+++ b/source/main.c	2026-11-22 00:30:00.800090946 +0100
+--- a/source/main.c
++++ b/source/main.c
 @@ -13,7 +13,7 @@
  // files are staged, so it must not exit after that.
  static int fail_after_staging(void) {
@@ -236,7 +308,7 @@
  
  int main(void) {
 +  /* PSWloader v1.0 (17.11.2026, user request): name and version first */
-+  notify_banner("Welcome to PSWloader!\nv1.0.3\n");
++  notify_banner("Welcome to PSWloader!\nv1.0.5\n");
 +
    if (setup_env()) {
 -    notify("Something went wrong while initiating.\nPlease make sure your fw "
@@ -269,8 +341,8 @@
    enter_rest_mode();
  
    while (1) {
---- a/source/utils.c	2026-10-31 16:31:19.000000000 +0100
-+++ b/source/utils.c	2026-11-22 00:13:08.156995353 +0100
+--- a/source/utils.c
++++ b/source/utils.c
 @@ -364,10 +364,20 @@
    vsnprintf(buffer, sizeof(buffer), fmt, args);
    va_end(args);

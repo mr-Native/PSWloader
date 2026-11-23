@@ -289,6 +289,27 @@ Ps5ExtApicOpenIer (
                 Drained, PS5_XAPIC (Base, 0xA0), PS5_XAPIC (Base, 0xF0), PS5_XAPIC (Base, 0x320),
                 PS5_XAPIC (Base, 0x380), PS5_XAPIC (Base, 0x390), PS5_XAPIC (Base, 0x3E0)));
       }
+      { /* r5.25.11 (HW 23.11. lab121: after a warm re-entry even a software int 0x21 into a valid target never returns):
+         * descriptor state for the cold vs. warm comparison - SGDT/SIDT/STR/segment registers and the raw GDT/IDT entries,
+         * memory reads only (no MSR, no MMIO) */
+        IA32_DESCRIPTOR Gd, Id; UINT16 Cs, Ss, Ds, Tr; UINT64 Fl, Sp;
+        AsmReadGdtr (&Gd); AsmReadIdtr (&Id);
+        __asm__ __volatile__ ("mov %%cs, %0; mov %%ss, %1; mov %%ds, %2; str %3; pushfq; pop %4; mov %%rsp, %5"
+                              : "=r" (Cs), "=r" (Ss), "=r" (Ds), "=r" (Tr), "=r" (Fl), "=r" (Sp));
+        DEBUG ((DEBUG_ERROR, "PS5 desc: GDTR %Lx/%x IDTR %Lx/%x CS %x SS %x DS %x TR %x RFLAGS %Lx RSP %Lx\n",
+                (UINT64)Gd.Base, Gd.Limit, (UINT64)Id.Base, Id.Limit, Cs, Ss, Ds, Tr, Fl, Sp));
+        for (UINTN S = 0; S < 16 && S * 8 + 7 <= Gd.Limit; S += 4) {
+          CONST UINT64 *G = (CONST UINT64 *)Gd.Base;
+          DEBUG ((DEBUG_ERROR, "PS5 desc: GDT[%02x] %016Lx %016Lx %016Lx %016Lx\n", (UINT32)(S * 8), G[S],
+                  S + 1 < 16 && (S + 1) * 8 + 7 <= Gd.Limit ? G[S + 1] : 0, S + 2 < 16 && (S + 2) * 8 + 7 <= Gd.Limit ? G[S + 2] : 0,
+                  S + 3 < 16 && (S + 3) * 8 + 7 <= Gd.Limit ? G[S + 3] : 0));
+        }
+        { STATIC CONST UINT8 V[] = { 0x0D, 0x0E, 0x20, 0x21, 0xE2 };
+          for (UINTN K = 0; K < sizeof (V); K++) if ((UINTN)V[K] * 16 + 15 <= Id.Limit) {
+            CONST UINT64 *E = (CONST UINT64 *)(Id.Base + (UINTN)V[K] * 16);
+            DEBUG ((DEBUG_ERROR, "PS5 desc: IDT[%02x] %016Lx %016Lx\n", V[K], E[0], E[1]));
+          } }
+      }
 #if defined (PS5_WARM_WATCHDOG)
       Ps5WarmProgress (42);
 #endif
@@ -418,6 +439,7 @@ Ps5ExtApicOpenIer (
 #if defined (PS5_WARM_PROBE) && PS5_WARM_PROBE == 69
       __asm__ __volatile__ ("int $0x20");   /* lab: software delivery of 0x20 - the LAPIC timer handler (probe 68 part) switches off */
 #endif
+#if !defined (PS5_WARM_HW_TIMER)   /* r5.25.11 --warm-hw-timer: with the IDT fixed a warm run opens the filter like a cold boot */
       if (*(volatile UINT64 *)(UINTN)0x111806040ULL == 0x314D524157575350ULL) {
         /* r5.25.5 (HW 19.11. lab66: alive for 60 s with the filter closed, stall as soon as it opens): after a warm
          * re-entry only what UEFI needs is opened - the timer vector 0x20 (C0-C4 stay as handed over). Everything else
@@ -431,7 +453,9 @@ Ps5ExtApicOpenIer (
          * ExitBootServices opens it for the OS */
         DEBUG ((DEBUG_ERROR, "PS5 ext-APIC BSP: warm re-entry - filter left closed until ExitBootServices\n"));
 #endif
-      } else {
+      } else
+#endif
+      {
         for (UINTN Index = 1; Index < 8; Index++) {
           PS5_XAPIC (Base, 0x480 + 0x10 * Index) = 0xFFFFFFFFU;
         }

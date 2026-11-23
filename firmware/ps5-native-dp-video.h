@@ -15,6 +15,12 @@
 #define PS5_TS(Tag)
 #endif
 #endif
+#ifndef PS5_WARM_LOGCELL
+#define PS5_WARM_LOGCELL 0x111806380ULL   /* r5.25.11: warm-run cell (see Ps5BootWindows.c) */
+#endif
+#ifndef PS5_MMHUB_SAVE
+#define PS5_MMHUB_SAVE 0x111806400ULL   /* r5.25.11: hand-over MMHUB VM values, kept across a warm re-entry */
+#endif
 #include "dcn201-stream.h"
 #include "dcn201-pipe-replay.h"
 #include "ps5-hdmi-video-protocol.h"
@@ -238,14 +244,38 @@ STATIC BOOLEAN Ps5NativeScanout(EFI_PCI_IO_PROTOCOL *Pci) {
   P[Y*Pitch+X]=C;
  }
  AsmWbinvd();
- DEBUG((DEBUG_INFO,"PS5 scanout fb readback: %x %x %x %x %x\n",P[H/2*Pitch+W/8],P[H/2*Pitch+W*3/8],P[H/2*Pitch+W*5/8],P[H/2*Pitch+W*7/8],P[H/2*Pitch+W/2]));
+ DEBUG((DEBUG_ERROR,"PS5 scanout fb readback: %x %x %x %x %x\n",P[H/2*Pitch+W/8],P[H/2*Pitch+W*3/8],P[H/2*Pitch+W*5/8],P[H/2*Pitch+W*7/8],P[H/2*Pitch+W/2]));
  DEBUG((DEBUG_INFO,"PS5 scanout: %ux%u pitch %u written, caches flushed; replay=%u regs\n",(UINT32)W,(UINT32)H,(UINT32)Pitch,R->count));
  Ps5GpuSnapshot();
  /* v2.46: MMHUB non-VM access windows as Linux mmhub_v2_0 programs them
   * (L1 TLB system access mode, system aperture, default page, AGP off). */
  CONST UINT32 Mmhub[]={0x69a00,0x69a04,0x69a08,0x69a20,0x69a24,0x69a30,0x69a3c,0x69a40,0x69a60,0x69a84,0x69b00,0x69b04,0x69cac,0x69cb0,0x69d2c,0x69d30,0x69dac,0x69db0,0x6a15c,0x6a160,0x6a164,0x6a180,0x6a184,0x6a188,0x6a1b0,0x6a1b4,0x6a1b8,0x6a1bc,0x6a1c0,0x6a1c4,0x6a1c8,0x6a1cc};
  for(UINTN I=0;I<sizeof(Mmhub)/sizeof(Mmhub[0]);I++){UINT32 Value=0;int R=VideoRead(Pci,Mmhub[I],&Value);
-  DEBUG((DEBUG_INFO,"PS5 scanout mmhub native: offset=%x value=%x access=%d\n",Mmhub[I],Value,R));}
+  DEBUG((DEBUG_ERROR,"PS5 scanout mmhub native: offset=%x value=%x access=%d\n",Mmhub[I],Value,R));}   /* r5.25.11: ERROR level for the cold vs. warm comparison */
+ {/* r5.25.11: MMHUB VM context 0/1 after a warm re-entry. GameOS hands the GPU over with the contexts as its own POST
+   * left them, the scanout surface address then passes straight through. bc250kmd enables context 0 for its GART, so
+   * after a restart the same surface address is translated through the old Windows page tables and the screen keeps
+   * showing the last Windows frame (HW 22./23.11.: firmware screen and menu invisible after a restart). A cold boot saves
+   * the hand-over values in the reserved arena (0x1_1180_6400, kept across the re-entry); a warm run writes them back
+   * before the replay. Registers the firmware already reads above (proven readable after a restart). */
+  STATIC CONST UINT32 Vm[8]={0x69b00,0x69b04,0x69cac,0x69cb0,0x69d2c,0x69d30,0x69dac,0x69db0};
+  volatile UINT64 *Sv=(volatile UINT64 *)(UINTN)PS5_MMHUB_SAVE;   /* [0] "MMHUBVM1", [1..8] hand-over values */
+  BOOLEAN WarmRun=*(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL==0x31474F4C4D524157ULL;
+  UINT32 Cur[8];
+  for(UINTN I=0;I<8;I++){Cur[I]=0;(void)VideoRead(Pci,Vm[I],&Cur[I]);}
+  DEBUG((DEBUG_ERROR,"PS5 mmhub vm (%a): cntl %x %x pt %x:%x start %x:%x end %x:%x\n",WarmRun?"warm":"cold",
+         Cur[0],Cur[1],Cur[3],Cur[2],Cur[5],Cur[4],Cur[7],Cur[6]));
+  if(!WarmRun){Sv[0]=0x314D564255484D4DULL;for(UINTN I=0;I<8;I++)Sv[1+I]=Cur[I];}
+  else if(Sv[0]==0x314D564255484D4DULL){
+   BOOLEAN Diff=FALSE;
+   for(UINTN I=0;I<8;I++)if(Cur[I]!=(UINT32)Sv[1+I])Diff=TRUE;
+   if(Diff){
+    for(UINTN I=0;I<8;I++)(void)VideoWrite(Pci,Vm[I],(UINT32)Sv[1+I]);   /* context controls first (index 0/1) */
+    for(UINTN I=0;I<8;I++){Cur[I]=0;(void)VideoRead(Pci,Vm[I],&Cur[I]);}
+    DEBUG((DEBUG_ERROR,"PS5 mmhub vm restored: cntl %x %x pt %x:%x start %x:%x end %x:%x\n",
+           Cur[0],Cur[1],Cur[3],Cur[2],Cur[5],Cur[4],Cur[7],Cur[6]));
+   }
+  }}
  /* VRAM-size draft (14.11.2026, UNTESTED): the system aperture covers the WHOLE framebuffer, as
   * mmhub_v2_0_init_system_aperture_regs does (low = fb_start>>18, high = fb_end>>18; AGP is empty). The loader sets
   * MMMC_VM_FB_LOCATION_BASE/TOP from vram.txt (configure_vram), the KMD never reprograms the aperture, and its
@@ -274,6 +304,16 @@ STATIC BOOLEAN Ps5NativeScanout(EFI_PCI_IO_PROTOCOL *Pci) {
  {UINT32 L=0,Hh=0;int E=VideoRead(Pci,0x6a1c4,&L)|VideoRead(Pci,0x6a1c8,&Hh);   /* VRAM-size log, READ ONLY */
   DEBUG((DEBUG_ERROR,"PS5 vram: MM sys aperture written %x..%x readback %x..%x (%d)\n",ApLow,ApHigh,L,Hh,E));}
  Ps5GpuSnapshot();
+ /* r5.25.12 (HW 23.11. fr1: after a restart the start screen was drawn but the screen kept the last Windows frame): the
+  * surface address is double-buffered and only taken at a flip. HW fr2: after a restart the pipes still read the Windows
+  * surface (EARLIEST_INUSE 3:B2FC0000) after the replay, flip controls were clean (0 / 0x40); the replay's flip is not
+  * taken while the pipe restarts. A second flip once the pipe runs switches both to the firmware surface (4:6C000000).
+  * Cold boot: in use = firmware surface right after the replay, no second flip. */
+ STATIC CONST UINT32 FlipCtl[2]={0xeb6c,0xf5bc},FlipCtl2[2]={0xeb70,0xf5c0},InUse[2]={0xeb94,0xf5e4},AddrLo[2]={0xeb28,0xf578};
+ BOOLEAN WarmFlip=*(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL==0x31474F4C4D524157ULL;
+ for(UINTN I=0;I<2;I++){UINT32 A=0,B=0,U=0,Uh=0;VideoRead(Pci,FlipCtl[I],&A);VideoRead(Pci,FlipCtl2[I],&B);VideoRead(Pci,InUse[I],&U);VideoRead(Pci,InUse[I]+4,&Uh);
+  DEBUG((DEBUG_ERROR,"PS5 scanout flip (%a, before replay): hubp%u flip %x flip2 %x in use %x:%08x\n",WarmFlip?"warm":"cold",I?3:0,A,B,Uh,U));
+  if(WarmFlip){VideoWrite(Pci,FlipCtl[I],0);VideoWrite(Pci,FlipCtl2[I],0x40);}}
  UINTN Failed=0;
  for(UINTN I=0;I<R->count;I++)
   if(VideoWrite(Pci,R->rows[I].offset,R->rows[I].value))Failed++;
@@ -288,10 +328,19 @@ STATIC BOOLEAN Ps5NativeScanout(EFI_PCI_IO_PROTOCOL *Pci) {
  if(VideoRead(Pci,0x13450,&V) || VideoWrite(Pci,0x13450,V&~1U))return FALSE;
  DEBUG((DEBUG_INFO,"PS5 scanout: HUBP unblanked, DPG disabled\n"));Ps5GpuSnapshot();
  gBS->Stall(PS5_PAINT?3000000:100000);   /* fast boot (15.11.): the 3 s only fed the diagnostic state read below */
+ for(UINTN Try=0;Try<2;Try++) {   /* r5.25.12: the address the pipes read now; after a restart a second flip if it is not ours */
+  BOOLEAN Ours=TRUE;
+  for(UINTN I=0;I<2;I++){UINT32 A=0,U=0,Uh=0;VideoRead(Pci,FlipCtl[I],&A);VideoRead(Pci,InUse[I],&U);VideoRead(Pci,InUse[I]+4,&Uh);
+   DEBUG((DEBUG_ERROR,"PS5 scanout flip (%a, after replay %u): hubp%u flip %x in use %x:%08x\n",WarmFlip?"warm":"cold",(UINT32)Try,I?3:0,A,Uh,U));
+   if(((UINT64)(Uh&0xFFFF)<<32|U)!=Fb)Ours=FALSE;}
+  if(Ours || !WarmFlip || Try)break;
+  for(UINTN I=0;I<2;I++){VideoWrite(Pci,FlipCtl[I],0);VideoWrite(Pci,FlipCtl2[I],0x40);VideoWrite(Pci,AddrLo[I]+4,(UINT32)(Fb>>32));VideoWrite(Pci,AddrLo[I],(UINT32)Fb);}
+  gBS->Stall(50000);
+ }
  CONST UINT32 Check[]={0xeacc,0xf51c,0x13450,0x140b8,0x140bc,0x14020,0x1401c,0x154b8,0x15730,0x157ac,0x13e28};
  for(UINTN I=0;I<sizeof(Check)/sizeof(Check[0]);I++) {
   UINT32 Value=0;int R=VideoRead(Pci,Check[I],&Value);
-  DEBUG((DEBUG_INFO,"PS5 scanout state: offset=%x value=%x access=%d\n",Check[I],Value,R));
+  DEBUG((DEBUG_ERROR,"PS5 scanout state: offset=%x value=%x access=%d\n",Check[I],Value,R));
  }
  Ps5GpuSnapshot(); Ps5GpuSnapshot();
  return TRUE;

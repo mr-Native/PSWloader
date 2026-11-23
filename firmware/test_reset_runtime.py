@@ -34,6 +34,7 @@ INTN EFIAPI CompareMem(CONST VOID *A,CONST VOID *B,UINTN L){CONST UINT8 *a=A,*b=
 VOID *EFIAPI AllocateReservedPages(UINTN P){(void)P;return NULL;}
 VOID *EFIAPI ZeroMem(VOID *B,UINTN L){volatile UINT8 *P=B;for(UINTN I=0;I<L;I++)P[I]=0;return B;}
 UINTN EFIAPI AsmReadCr4(VOID){return 0;}
+VOID EFIAPI AsmReadIdtr(IA32_DESCRIPTOR *D){D->Base=0;D->Limit=0;}
 static EFI_STATUS EFIAPI Create(UINT32 Type,EFI_TPL Tpl,EFI_EVENT_NOTIFY Notify,CONST VOID *Context,CONST EFI_GUID *Group,EFI_EVENT *Event) { *Event=(EFI_EVENT)(UINTN)++EventCount; return EFI_SUCCESS; }
 static EFI_STATUS EFIAPI Close(EFI_EVENT Event) { return EFI_SUCCESS; }
 static EFI_STATUS EFIAPI Get(EFI_PHYSICAL_ADDRESS Address,EFI_GCD_MEMORY_SPACE_DESCRIPTOR *D) { D->GcdMemoryType=EfiGcdMemoryTypeMemoryMappedIo; D->Attributes=EFI_MEMORY_WB; return EFI_SUCCESS; }

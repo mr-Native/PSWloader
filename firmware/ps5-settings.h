@@ -12,6 +12,8 @@
  *                          then the firmware writes diag=off; written only when the key was set)
  *   bootlist=AAAAAAAA,...  (r5.21, v1.6: boot order of disks by stable id, up to PS5_BOOTLIST_MAX; written only when set;
  *                          ids of unplugged disks keep their place, see ps5_bootlist_merge)
+ *   fastrestart=1          0|1  (r5.25.12, v1.9: 1 = a Windows restart skips the start screen and starts Windows at once;
+ *                          0 = the start screen is shown like at power-on (fastboot decides 3 or 15 s); written only when 1)
  *   usbpowercycle=1        0|1  (r5.25.1, v1.8: power-cycle the USB root ports once at start; default 1, written only when 0)
  *   testsign=auto          auto|off  (r5.22, v1.7: auto = the firmware sets testsigning in the BCD of a started Windows ESP
  *                          if it is missing (ps5-bcd.h); written only when off)
@@ -23,14 +25,14 @@
 #define PS5_SETTINGS_H_
 #define PS5_SET_EXTRA 192
 #define PS5_BOOTLIST_MAX 16
-struct ps5_settings { unsigned bootlist_n, bootlist[PS5_BOOTLIST_MAX]; unsigned preset, lang, fastboot, bootorder, pstates, refresh, diag, testsign, usbcycle, extra_len;   /* testsign 0 auto 1 off */   /* diag 0 absent 1 once 2 off 3 full */ char extra[PS5_SET_EXTRA]; };   /* diag 0 absent 1 once 2 off */   /* refresh 0 native 1 max */   /* preset 0/1/2, lang 0 en 1 de, bootorder 0 internal 1 usb */
+struct ps5_settings { unsigned bootlist_n, bootlist[PS5_BOOTLIST_MAX]; unsigned preset, lang, fastboot, bootorder, pstates, refresh, diag, testsign, usbcycle, fastrestart, extra_len;   /* testsign 0 auto 1 off */   /* diag 0 absent 1 once 2 off 3 full */ char extra[PS5_SET_EXTRA]; };   /* diag 0 absent 1 once 2 off */   /* refresh 0 native 1 max */   /* preset 0/1/2, lang 0 en 1 de, bootorder 0 internal 1 usb */
 typedef unsigned (*ps5_crc32_fn)(const char *data, unsigned len);
 static const char *const ps5_set_preset[3] = { "efficiency", "standard", "oc" };
 static const char *const ps5_set_lang[2] = { "en", "de" };
 static const char *const ps5_set_boot[2] = { "internal", "usb" };
 static const char *const ps5_set_refresh[2] = { "native", "max" };
 static const char *const ps5_set_diag[4] = { "", "once", "off", "full" };
-static inline void ps5_settings_default(struct ps5_settings *s) { s->preset = 1; s->lang = 0; s->fastboot = 0; s->bootorder = 0; s->pstates = 0; s->refresh = 0; s->diag = 0; s->testsign = 0; s->usbcycle = 1; s->extra_len = 0; s->extra[0] = 0; s->bootlist_n = 0; }
+static inline void ps5_settings_default(struct ps5_settings *s) { s->preset = 1; s->lang = 0; s->fastboot = 0; s->bootorder = 0; s->pstates = 0; s->refresh = 0; s->diag = 0; s->testsign = 0; s->usbcycle = 1; s->fastrestart = 0; s->extra_len = 0; s->extra[0] = 0; s->bootlist_n = 0; }
 static inline unsigned ps5_set_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }
 static inline int ps5_set_eq(const char *a, unsigned n, const char *b) { unsigned m = ps5_set_len(b); if (n != m) return 0; for (unsigned i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
 static inline int ps5_set_pick(const char *v, unsigned n, const char *const *names, unsigned count) { for (unsigned i = 0; i < count; i++) if (ps5_set_eq(v, n, names[i])) return (int)i; return -1; }
@@ -53,6 +55,7 @@ static inline int ps5_settings_parse(const char *t, unsigned size, ps5_crc32_fn 
         if (ps5_set_eq(k, kn, "preset") && (x = ps5_set_pick(v, vn, ps5_set_preset, 3)) >= 0) r.preset = (unsigned)x;
         else if (ps5_set_eq(k, kn, "lang") && (x = ps5_set_pick(v, vn, ps5_set_lang, 2)) >= 0) r.lang = (unsigned)x;
         else if (ps5_set_eq(k, kn, "fastboot") && vn == 1 && (v[0] == '0' || v[0] == '1')) r.fastboot = (unsigned)(v[0] - '0');
+        else if (ps5_set_eq(k, kn, "fastrestart") && vn == 1 && (v[0] == '0' || v[0] == '1')) r.fastrestart = (unsigned)(v[0] - '0');   /* v1.9 */
         else if (ps5_set_eq(k, kn, "usbpowercycle") && vn == 1 && (v[0] == '0' || v[0] == '1')) r.usbcycle = (unsigned)(v[0] - '0');   /* v1.8 */
         else if (ps5_set_eq(k, kn, "pstates") && vn == 1 && (v[0] == '0' || v[0] == '1')) r.pstates = (unsigned)(v[0] - '0');
         else if (ps5_set_eq(k, kn, "bootorder") && (x = ps5_set_pick(v, vn, ps5_set_boot, 2)) >= 0) r.bootorder = (unsigned)x;
@@ -67,7 +70,7 @@ static inline int ps5_settings_parse(const char *t, unsigned size, ps5_crc32_fn 
                 at += 8; if (at < vn && v[at] == ',') at++; else break;
             }
         }
-        else if (!ps5_set_eq(k, kn, "preset") && !ps5_set_eq(k, kn, "lang") && !ps5_set_eq(k, kn, "fastboot") && !ps5_set_eq(k, kn, "usbpowercycle") && !ps5_set_eq(k, kn, "pstates") &&
+        else if (!ps5_set_eq(k, kn, "preset") && !ps5_set_eq(k, kn, "lang") && !ps5_set_eq(k, kn, "fastboot") && !ps5_set_eq(k, kn, "fastrestart") && !ps5_set_eq(k, kn, "usbpowercycle") && !ps5_set_eq(k, kn, "pstates") &&
                  !ps5_set_eq(k, kn, "bootorder") && !ps5_set_eq(k, kn, "refresh") && !ps5_set_eq(k, kn, "diag") && !ps5_set_eq(k, kn, "bootlist") && !ps5_set_eq(k, kn, "testsign") &&
                  r.extra_len + (end - start) + 3 <= PS5_SET_EXTRA) {   /* v1.4: unknown key, kept with CRLF */
             for (unsigned j = start; j < end; j++) r.extra[r.extra_len++] = t[j];
@@ -99,6 +102,7 @@ static inline unsigned ps5_settings_format(const struct ps5_settings *s, ps5_crc
     n = ps5_set_put(out, n, cap, ps5_set_boot[s->bootorder > 1 ? 0 : s->bootorder]);
     n = ps5_set_put(out, n, cap, s->pstates ? "\r\npstates=1\r\n" : "\r\n");
     if (s->refresh == 1) n = ps5_set_put(out, n, cap, "refresh=max\r\n");
+    if (s->fastrestart == 1) n = ps5_set_put(out, n, cap, "fastrestart=1\r\n");   /* v1.9: default 0 is not written */
     if (s->usbcycle == 0) n = ps5_set_put(out, n, cap, "usbpowercycle=0\r\n");   /* v1.8: default 1 is not written */
     if (s->diag >= 1 && s->diag <= 3) { n = ps5_set_put(out, n, cap, "diag="); n = ps5_set_put(out, n, cap, ps5_set_diag[s->diag]); n = ps5_set_put(out, n, cap, "\r\n"); }
     if (s->testsign == 1) n = ps5_set_put(out, n, cap, "testsign=off\r\n");   /* v1.7 */

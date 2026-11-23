@@ -30,7 +30,7 @@
 #include "../Include/Ps5PowerPreset.h"   /* r5.6 */
 
 #ifndef PS5_FIRMWARE_LABEL
-#define PS5_FIRMWARE_LABEL L"PSWloader v1.0.4"   /* r5.22: user-visible name PSWloader; r5.24: revision only under Advanced */
+#define PS5_FIRMWARE_LABEL L"PSWloader v1.0.5"   /* r5.22: user-visible name PSWloader; r5.24: revision only under Advanced */
 #endif
 #ifndef PS5_FIRMWARE_REV
 #define PS5_FIRMWARE_REV L"r5.25.2"
@@ -397,13 +397,14 @@ STATIC EFI_STATUS EFIAPI Callback (CONST EFI_HII_CONFIG_ACCESS_PROTOCOL *This, E
     return EFI_SUCCESS;
   }
   if (Action == EFI_BROWSER_ACTION_CHANGED && Value != NULL &&
-      (Id == PS5_FAST_KEY || Id == PS5_PSTATE_KEY || Id == PS5_BOOTORDER_KEY || Id == PS5_REFRESH_KEY || Id == PS5_USBCYCLE_KEY)) {
+      (Id == PS5_FAST_KEY || Id == PS5_PSTATE_KEY || Id == PS5_BOOTORDER_KEY || Id == PS5_REFRESH_KEY || Id == PS5_USBCYCLE_KEY || Id == PS5_FASTRESTART_KEY)) {
     STATIC EFI_GUID SetGuid = PS5_POWER_PRESET_GUID, BootNowGuid = PS5_BOOT_NOW_PROTOCOL_GUID;
     UINT32 V = (Type == EFI_IFR_TYPE_NUM_SIZE_8 ? Value->u8 : Type == EFI_IFR_TYPE_NUM_SIZE_16 ? Value->u16 : Value->u32) ? 1 : 0;
     CHAR16 *Var = Id == PS5_FAST_KEY ? L"Ps5FastBoot" :
                   Id == PS5_PSTATE_KEY ? L"Ps5PStates" :
                   Id == PS5_BOOTORDER_KEY ? L"Ps5BootOrder" :
-                  Id == PS5_REFRESH_KEY ? L"Ps5Refresh" : L"Ps5UsbCycle";
+                  Id == PS5_REFRESH_KEY ? L"Ps5Refresh" :
+                  Id == PS5_FASTRESTART_KEY ? L"Ps5FastRestart" : L"Ps5UsbCycle";
     EFI_STATUS St = gRT->SetVariable (Var, &SetGuid, EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS, sizeof (V), &V);
     PS5_BOOT_NOW_PROTOCOL *Bn = NULL; EFI_STATUS Sv = EFI_NOT_STARTED;
     if (!EFI_ERROR (St) && !EFI_ERROR (gBS->LocateProtocol (&BootNowGuid, NULL, (VOID **)&Bn)) && Bn != NULL && Bn->Revision >= 2 && Bn->SaveSettings != NULL)

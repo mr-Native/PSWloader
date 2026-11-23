@@ -15,6 +15,9 @@
 #ifdef PS5_WARM_RESCUE
 #include "ps5-warm-probe.h"
 #endif
+#ifndef PS5_WARM_LOGCELL
+#define PS5_WARM_LOGCELL 0x111806380ULL   /* r5.25.11: set by Ps5WarmReadRecord on a warm run (host tests: a variable) */
+#endif
 STATIC CONST UINT8 mMarker[16]="PS5LOGFILE1";
 #define RING_BYTES 65552U
 STATIC UINT64 mSnapshot[RING_BYTES / sizeof(UINT64)];
@@ -26,7 +29,7 @@ STATIC UINTN mBootSnapshots;
 STATIC EFI_GUID mPs5BootSnapshotGuid={0x873f7798,0xe801,0x4ec4,{0x86,0x97,0x30,0xb7,0xb3,0xa1,0xfa,0x52}};
 STATIC VOID *mFsRegistration;
 STATIC VOID *mPartitionRegistration;
-STATIC EFI_STATUS Export(EFI_HANDLE Handle) {
+STATIC EFI_STATUS Export(EFI_HANDLE Handle,CONST CHAR16 *Name) {
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *Fs;
   EFI_FILE_PROTOCOL *Root=NULL,*File=NULL;
   EFI_FILE_INFO *Info=NULL;
@@ -37,7 +40,7 @@ STATIC EFI_STATUS Export(EFI_HANDLE Handle) {
   if(EFI_ERROR(Status)) return Status;
   Status=Fs->OpenVolume(Fs,&Root);
   if(EFI_ERROR(Status)) return Status;
-  Status=Root->Open(Root,&File,L"\\PS5UEFI.LOG",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0);
+  Status=Root->Open(Root,&File,(CHAR16 *)Name,EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0);
   if(EFI_ERROR(Status)) goto Done;
   UINTN Size=0;
   Status=File->GetInfo(File,&gEfiFileInfoGuid,&Size,NULL);
@@ -81,13 +84,31 @@ STATIC VOID Snapshot(BOOLEAN Early) {
   EFI_HANDLE *Handles=NULL;
   UINTN Count=0;
   EFI_STATUS Status=gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleFileSystemProtocolGuid,NULL,&Count,&Handles);
+  /* lab rescue (22.11.): the log of the hung run goes to its own slot \PS5RESCU.LOG, so the next normal start (which
+   * snapshots into \PS5UEFI.LOG) does not overwrite it before it is read */
+  CONST CHAR16 *Name=L"\\PS5UEFI.LOG";
+  /* r5.25.11: after a warm re-entry (cell set by Ps5WarmReadRecord) into \PS5WARM.LOG if a volume has that slot, so a
+   * hung restart's log survives the next normal start */
+  BOOLEAN Warm=*(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL==0x31474F4C4D524157ULL;
+  if(Warm) Name=L"\\PS5WARM.LOG";
+#ifdef PS5_WARM_RESCUE
+  if(Ps5WarmRescueRun() && *(volatile UINT64 *)(UINTN)PS5_WARM_RESCUE_AREA==PS5_WARM_RESCUE_MAGIC) Name=L"\\PS5RESCU.LOG";
+#endif
   if(!EFI_ERROR(Status)) {
     Status=EFI_NOT_FOUND;
     for(UINTN Index=0;Index<Count;Index++) {   /* r5.25.4: every volume with a valid slot; a failing volume (old slot of
                                                   * another size, write-protected) no longer ends the search */
-      EFI_STATUS Attempt=Export(Handles[Index]);
+      EFI_STATUS Attempt=Export(Handles[Index],Name);
       if(!EFI_ERROR(Attempt)) Status=EFI_SUCCESS;
       else if(Attempt!=EFI_NOT_FOUND && Status==EFI_NOT_FOUND) Status=Attempt;
+    }
+    if(Warm && Status==EFI_NOT_FOUND) {   /* no \PS5WARM.LOG slot anywhere: the normal slot as before */
+      Name=L"\\PS5UEFI.LOG";
+      for(UINTN Index=0;Index<Count;Index++) {
+        EFI_STATUS Attempt=Export(Handles[Index],Name);
+        if(!EFI_ERROR(Attempt)) Status=EFI_SUCCESS;
+        else if(Attempt!=EFI_NOT_FOUND && Status==EFI_NOT_FOUND) Status=Attempt;
+      }
     }
     FreePool(Handles);
   }

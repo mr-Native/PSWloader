@@ -201,7 +201,11 @@ __asm__ (
   /* r5.25.5: a 256-entry IDT in the reserved arena (WarmPrepare, 0x1_1183_0000) like the bootstrap's on a cold boot - with
    * the empty IDT (limit 0) the DXE core installed no exception handler at all (IdtEntryCount = (limit + 1) / 16 = 0), and
    * the first exception after a restart from Windows was a silent triple fault (HW 19.11. probes 32/38 off, 33 not) */
-  "  sub $16, %rsp\n  movw $0xfff, (%rsp)\n  movabs $0x111830000, %rax\n  mov %rax, 2(%rsp)\n  lidt (%rsp)\n  add $16, %rsp\n"
+  /* r5.25.11 (HW 23.11. lab122): the table WarmPrepare built is named in the cell 0x1_1182_FFF8 - it alternates between
+   * 0x1_1183_0000 and 0x1_1183_6000, because after a warm re-entry the loaded table is updated in place by the DXE core and
+   * CpuDxe (selector 0x38) and must never be overwritten by the preparation of the next restart */
+  "  sub $16, %rsp\n  movw $0xfff, (%rsp)\n  movabs $0x11182fff8, %rax\n  mov (%rax), %rax\n  test %rax, %rax\n  jnz 57f\n"
+  "  movabs $0x111830000, %rax\n57:\n  mov %rax, 2(%rsp)\n  lidt (%rsp)\n  add $16, %rsp\n"
 #if defined (PS5_WARM_PROBE) && PS5_WARM_PROBE == 21
   "  jmp 46f\n"   /* lab: ICC off at new GDT/stack/no IDT */
 #endif
@@ -415,6 +419,22 @@ STATIC UINT8 WarmCap (UINT32 Fn, UINT8 Id) {
 }
 STATIC VOID WarmPciSnapshot (VOID) {
   mWarmPciN = 0;
+  /* r5.25.11: network functions (class 02: Ethernet, Wi-Fi) get a function level reset first - their Windows drivers may
+   * leave the DMA rings running into Windows memory (ps5wifi's shutdown only flags the adapter), and the replay below turns
+   * bus mastering back on with the hand-over command register. FLR stops every DMA; the drivers initialise the chips anew. */
+  { UINTN Flr = 0;
+    for (UINT32 I = 0; I < 0x8000; I++) {
+      UINT32 Fn = I << 12;
+      if (WarmCfg (Fn) == 0xFFFFFFFF || (WarmCfg (Fn + 8) >> 24) != 0x02 || ((WarmCfg (Fn + 0x0C) >> 16) & 0x7F) != 0) continue;
+      UINT8 Exp = WarmCap (Fn, 0x10);
+      if (!Exp || !(WarmCfg (Fn + Exp + 4) & BIT28)) continue;
+      WarmPciPut (Fn + 4, WarmCfg (Fn + 4) & ~4u);                       /* bus master off first */
+      WarmPciPut (Fn + Exp + 8, (WarmCfg (Fn + Exp + 8) & 0xFFFF) | 0x8000u);   /* initiate FLR */
+      DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: FLR planned for %x (%08x)\n", Fn, WarmCfg (Fn)));
+      Flr++;
+    }
+    if (Flr) WarmPciPut (0xFFFFFFFF, 0);   /* one replay wait = 20M pause loops, well above the 100 ms FLR time */
+  }
   for (UINT32 Pass = 0; Pass < 2; Pass++) {
     for (UINT32 I = 0; I < 0x8000; I++) {
       UINT32 Fn = I << 12;
@@ -519,12 +539,20 @@ STATIC VOID WarmPrepare (VOID) {
     volatile UINT8 *Stub = (volatile UINT8 *)(UINTN)(PS5W_FIXED + 0x31000);
     Stub[0] = 0xFA; Stub[1] = 0xF4; Stub[2] = 0xEB; Stub[3] = 0xFC;   /* cli; hlt; jmp back to hlt */
     Stub[16] = 0x48; Stub[17] = 0xCF;                                  /* iretq */
-    volatile UINT64 *Idt = (volatile UINT64 *)(UINTN)(PS5W_FIXED + 0x30000);
+    /* r5.25.11 (HW 23.11. lab122): after a warm re-entry the table at 0x30000 IS the live IDT (the DXE core and CpuDxe
+     * updated its entries in place, selector 0x38); writing the selector-8 stubs over it made every later interrupt or
+     * exception a triple fault (probe 74/78, the Windows logo without spinner). Build the next table in the other slot. */
+    IA32_DESCRIPTOR Live;
+    AsmReadIdtr (&Live);
+    UINT64 Slot = (Live.Base == (UINTN)(PS5W_FIXED + 0x30000)) ? PS5W_FIXED + 0x36000 : PS5W_FIXED + 0x30000;
+    volatile UINT64 *Idt = (volatile UINT64 *)(UINTN)Slot;
     for (UINTN V = 0; V < 256; V++) {
       UINT64 H = PS5W_FIXED + 0x31000 + (V < 32 ? 0 : 16);
       Idt[2 * V] = (H & 0xFFFF) | (8ULL << 16) | (0x8EULL << 40) | (((H >> 16) & 0xFFFF) << 48);
       Idt[2 * V + 1] = H >> 32;
     }
+    *(volatile UINT64 *)(UINTN)(PS5W_FIXED + 0x2FFF8) = Slot;
+    DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: next trampoline IDT at %Lx (live IDT %Lx)\n", Slot, (UINT64)Live.Base));
   }
   mWarmPml4 = Tables;
   UINT64 *Pdpt = Tables + 512;
@@ -601,15 +629,26 @@ STATIC BOOLEAN WarmGuidOf (UINT16 Option, UINT8 *Guid, BOOLEAN NeedWindows) {
   return FALSE;
 }
 STATIC VOID WarmReadOsRequest (PS5_WARM_PARAMS *P) {
-  UINT64 Ind = 0; UINTN Size = sizeof (Ind); UINT16 Next = 0, Order[32];
-  P->NextFlags = 0;
+  UINT64 Ind = 0; UINTN Size = sizeof (Ind); UINT16 Next = 0, Order[32]; EFI_STATUS S;
+  /* r5.25.11: bits 8.. of NextFlags carry what was found (the restarted firmware logs them; it uses only bits 0/1):
+   * 8-15 BootOrder status (low byte, 0 = ok), 16-23 BootOrder entries, 24-31 entries with a GPT HD() path,
+   * 32-39 BootNext status (low byte), 40-47 index of the chosen BootOrder entry, 48 diagnostics present */
+  P->NextFlags = 1ULL << 48;
   if (!EFI_ERROR (mPrivateRt->GetVariable (L"OsIndications", &gEfiGlobalVariableGuid, NULL, &Size, &Ind)) && (Ind & 1)) P->NextFlags |= 1;
   Size = sizeof (Next);
-  if (!EFI_ERROR (mPrivateRt->GetVariable (L"BootNext", &gEfiGlobalVariableGuid, NULL, &Size, &Next)) && Size == 2 &&
-      WarmGuidOf (Next, P->NextGuid, FALSE)) { P->NextFlags |= 2; return; }
+  S = mPrivateRt->GetVariable (L"BootNext", &gEfiGlobalVariableGuid, NULL, &Size, &Next);
+  P->NextFlags |= (UINT64)(S & 0xFF) << 32;
+  if (!EFI_ERROR (S) && Size == 2 && WarmGuidOf (Next, P->NextGuid, FALSE)) { P->NextFlags |= 2; return; }
   Size = sizeof (Order);
-  if (!EFI_ERROR (mPrivateRt->GetVariable (L"BootOrder", &gEfiGlobalVariableGuid, NULL, &Size, Order)))
-    for (UINTN I = 0; I < Size / 2; I++) if (WarmGuidOf (Order[I], P->NextGuid, TRUE)) { P->NextFlags |= 2; return; }
+  S = mPrivateRt->GetVariable (L"BootOrder", &gEfiGlobalVariableGuid, NULL, &Size, Order);
+  P->NextFlags |= (UINT64)(S & 0xFF) << 8;
+  if (EFI_ERROR (S)) return;
+  P->NextFlags |= (UINT64)((Size / 2) & 0xFF) << 16;
+  UINT8 Tmp[16]; UINTN Gpt = 0;
+  for (UINTN I = 0; I < Size / 2; I++) if (WarmGuidOf (Order[I], Tmp, FALSE)) Gpt++;
+  P->NextFlags |= (UINT64)(Gpt & 0xFF) << 24;
+  for (UINTN I = 0; I < Size / 2; I++)
+    if (WarmGuidOf (Order[I], P->NextGuid, TRUE)) { P->NextFlags |= 2 | ((UINT64)(I & 0xFF) << 40); return; }
 }
 STATIC VOID WarmReentry (VOID) {
 #ifdef PS5_WARM_OFF_TEST

@@ -69,7 +69,7 @@ STATIC VOID Ps5CpuNameSmbios (VOID)
     T0->SystemBiosMajorRelease = 1; T0->SystemBiosMinorRelease = 0;
     T0->EmbeddedControllerFirmwareMajorRelease = 0xFF; T0->EmbeddedControllerFirmwareMinorRelease = 0xFF;
     UINT8 *P0 = Buf + T0->Hdr.Length;
-    Ps5AddSmbiosString (&P0, "PSWloader"); Ps5AddSmbiosString (&P0, "PSWloader v1.0.4"); Ps5AddSmbiosString (&P0, "11/22/2026"); *P0++ = 0;
+    Ps5AddSmbiosString (&P0, "PSWloader"); Ps5AddSmbiosString (&P0, "PSWloader v1.0.5"); Ps5AddSmbiosString (&P0, "11/22/2026"); *P0++ = 0;
     H = SMBIOS_HANDLE_PI_RESERVED;
     Status = Smbios->Add (Smbios, NULL, &H, (EFI_SMBIOS_TABLE_HEADER *)Buf);
     DEBUG ((DEBUG_ERROR, "PS5 name: SMBIOS type 0 add %r (handle %x)\n", Status, H));

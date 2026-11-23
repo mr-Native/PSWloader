@@ -1,4 +1,5 @@
-// Ps5InfoDxe v1.3 (r5.25.1): Start-up > Advanced: power-cycle USB drives at start (default on).
+// Ps5InfoDxe v1.4 (r5.25.12): Start-up: "Fast restart" - a Windows restart skips the start screen (default off).
+// v1.3 (r5.25.1): Start-up > Advanced: power-cycle USB drives at start (default on).
 // v1.2 (r5.22): tab "Boot" - boot order list on top (arranged with Enter + arrows or the up/down buttons),
 //   start-up (fast boot), boot now and "Boot once from ..." (EDK2 Boot Manager, only reachable from here).
 //   The old internal/USB choice stays hidden for the migration. v1.0 (r5.21): list. v0.8 (r5.18): boot order, fast boot.
@@ -13,6 +14,7 @@ formset
   efivarstore PS5_FASTBOOT, attribute = 0x00000006, name = Ps5FastBoot, guid = PS5_POWER_PRESET_GUID;
   efivarstore PS5_BOOTORDER, attribute = 0x00000006, name = Ps5BootOrder, guid = PS5_POWER_PRESET_GUID;
   efivarstore PS5_BOOT_LIST, attribute = 0x00000006, name = Ps5BootListSel, guid = PS5_POWER_PRESET_GUID;
+  efivarstore PS5_FASTRESTART, attribute = 0x00000006, name = Ps5FastRestart, guid = PS5_POWER_PRESET_GUID;
   efivarstore PS5_USBCYCLE, attribute = 0x00000006, name = Ps5UsbCycle, guid = PS5_POWER_PRESET_GUID;
   form formid = 1, title = STRING_TOKEN(STR_BOOT_TITLE);
     subtitle text = STRING_TOKEN(STR_BLIST_SUB);
@@ -46,6 +48,11 @@ formset
     subtitle text = STRING_TOKEN(STR_BEH_SUB);
     oneof varid = Ps5FastBoot.Value, questionid = PS5_FAST_KEY,
       prompt = STRING_TOKEN(STR_FAST), help = STRING_TOKEN(STR_FAST_HELP), flags = INTERACTIVE,
+      option text = STRING_TOKEN(STR_FAST_OFF), value = 0, flags = DEFAULT;
+      option text = STRING_TOKEN(STR_FAST_ON), value = 1, flags = 0;
+    endoneof;
+    oneof varid = Ps5FastRestart.Value, questionid = PS5_FASTRESTART_KEY,
+      prompt = STRING_TOKEN(STR_FRST), help = STRING_TOKEN(STR_FRST_HELP), flags = INTERACTIVE,
       option text = STRING_TOKEN(STR_FAST_OFF), value = 0, flags = DEFAULT;
       option text = STRING_TOKEN(STR_FAST_ON), value = 1, flags = 0;
     endoneof;

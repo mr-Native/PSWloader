@@ -22,9 +22,9 @@ ACPI tables and a set of Windows drivers.
 - Wired Ethernet, on-board Wi-Fi 6 (2.4 GHz / 5 GHz), USB keyboard and mouse
 - Power button shutdown, fan control by CPU temperature, three power presets
 - Firmware setup (English and German) with boot order, display and power settings and a system check
+- Restart from Windows goes straight back to Windows, without GameOS
 
-Not supported (yet): Bluetooth, audio, changing the resolution from Windows. A restart from Windows returns to
-Windows without GameOS.
+Not supported (yet): Bluetooth, audio, changing the resolution from Windows.
 
 Tested on system software 13.60.
 
@@ -76,8 +76,8 @@ If you're a content creator showcasing PSWloader, it would be great if you could
 
 - **Firmware**: EDK2 at `ec82c96152507d64055a8965fe261fb9aaca3279` with `firmware/edk2/*.diff` applied, then
   `EDK2=/path/to/edk2 firmware/build-vN.sh <version>`. Stage 1: `firmware/build-bootstrap.py`.
-- **Payload**: [ps5-linux-loader](https://github.com/ps5-linux/ps5-linux-loader) at `e7954b27` plus
-  `pswloader/pswloader-v1.0-from-upstream-e7954b27.patch`, built with the ps5-payload-sdk.
+- **Payload**: [ps5-linux-loader](https://github.com/ps5-linux/ps5-linux-loader) at `badfe48` plus
+  `pswloader/pswloader-v1.0-from-upstream-badfe48.patch`, built with the ps5-payload-sdk.
 - **Drivers**: `drivers/<name>/build.sh` (clang and lld-link against the WDK NuGet packages).
 - **Installer**: `installer/launcher/build.sh` and `installer/tools/make-payload.py`.
 

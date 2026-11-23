@@ -1,4 +1,4 @@
-# PSWSetup.ps1 v0.5.5 (v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
+# PSWSetup.ps1 v0.5.7 (v0.5.7: SelfCheck also installs PSWWatch.ps1 + task 'PSWloader Watch' (background log C:\PSWloader\logs\watch); v0.5.6: component SelfCheck - the support tool in C:\PSWloader\selfcheck; v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
 #   DefaultsV2 value that differs from its compiled factory value (0xC0000182, Code 37), so a fresh install never got a first
 #   driver start; mode 0 comes from the generation override written by ps5-postboot.ps1; v0.5.4: PowerPlan also turns off USB selective suspend and USB 3 link power management (U1/U2) - HW 18.11.:
 #   with selective suspend on, an idle USB SSD (RTL9210B, UAS) on the AMD xHCI does not come back (events 129/153, no more I/O);
@@ -404,6 +404,18 @@ $Comp.Power = @{ Default = $true; Phase = 2   # ps5pwr from the payload (release
                          Cli = Test-FileHashIs 'C:\BC250\drivers\ps5pwr\v1.10\ps5pwr.ps1' (Get-PayloadEntry 'tools/ps5pwr/ps5pwr.ps1').sha256 } }
   Install = { if (-not (Test-DriverCurrent 'ps5pwr' 'drivers/ps5pwr/ps5pwr.sys') -or $Force) { Install-DriverPackage Power 'drivers/ps5pwr' 'ps5pwr.inf' -ReinstallAtBootHwId $(if (Test-Ps5PwrBound) { 'PCI\VEN_104D&DEV_9107' } else { '' }) }
               Install-PayloadFile Power 'tools/ps5pwr/ps5pwr.ps1' 'C:\BC250\drivers\ps5pwr\v1.10\ps5pwr.ps1' | Out-Null }
+}
+$Comp.SelfCheck = @{ Default = $true; Phase = 2   # v0.5.6: support tool - C:\PSWloader\selfcheck\PSWSelfCheck.cmd writes one zip with every log to ...\results
+  Detect = { [ordered]@{ Script = Test-FileHashIs 'C:\PSWloader\selfcheck\PSWSelfCheck.ps1' (Get-PayloadEntry 'tools/selfcheck/PSWSelfCheck.ps1').sha256
+                         Launcher = Test-FileHashIs 'C:\PSWloader\selfcheck\PSWSelfCheck.cmd' (Get-PayloadEntry 'tools/selfcheck/PSWSelfCheck.cmd').sha256
+                         Watch = Test-FileHashIs 'C:\PSWloader\selfcheck\PSWWatch.ps1' (Get-PayloadEntry 'tools/selfcheck/PSWWatch.ps1').sha256
+                         WatchTask = [bool](Get-ScheduledTask -TaskName 'PSWloader Watch' -ErrorAction SilentlyContinue) } }
+  Install = { Install-PayloadFile SelfCheck 'tools/selfcheck/PSWSelfCheck.ps1' 'C:\PSWloader\selfcheck\PSWSelfCheck.ps1' | Out-Null
+              Install-PayloadFile SelfCheck 'tools/selfcheck/PSWSelfCheck.cmd' 'C:\PSWloader\selfcheck\PSWSelfCheck.cmd' | Out-Null
+              Install-PayloadFile SelfCheck 'tools/selfcheck/PSWWatch.ps1' 'C:\PSWloader\selfcheck\PSWWatch.ps1' | Out-Null   # v0.5.7: background log, at startup and every minute
+              Register-Task SelfCheck 'PSWloader Watch' (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\PSWloader\selfcheck\PSWWatch.ps1"') `
+                @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1))) `
+                (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable) }
 }
 $Comp.PowerButton = @{ Default = $true; Phase = 2   # listener for ps5pwr v1.10 power-button presses -> Windows power-button action
   Detect = { [ordered]@{ Exe = Test-FileHashIs 'C:\ps5-work\ps5-powerbutton.exe' (Get-PayloadEntry 'scripts/ps5-powerbutton.exe').sha256

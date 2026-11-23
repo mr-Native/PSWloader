@@ -14,7 +14,7 @@ class ExportTests(unittest.TestCase):
     def setUpClass(cls):
         cls.work=tempfile.TemporaryDirectory();work=Path(cls.work.name)
         source=HERE/'Ps5PlatformPkg/LogExportDxe/LogExportDxe.c'
-        (work/'mock.c').write_text('#include "'+str(source)+'"\n'+r'''
+        (work/'mock.c').write_text('static unsigned long long Ps5TestLogCell;\n#define PS5_WARM_LOGCELL ((unsigned long long)(unsigned long)&Ps5TestLogCell)\n#include "'+str(source)+'"\n'+r'''
 #include <stdlib.h>
 #include <string.h>
 static int Mode,Writes,Flushes,Closes,Opens,BadOpen,Snapshots;
@@ -59,7 +59,7 @@ int Run(int M){
  if(M==1)Partition.Info.Gpt.UniquePartitionGUID.Data1=0;
  Bs.HandleProtocol=Handle;Fs.OpenVolume=Volume;Root.Open=Open;Root.Close=Close;
  File.Close=Close;File.GetInfo=Info;File.Read=Read;File.SetPosition=Position;File.Write=Write;File.Flush=Flush;
- return Export(NULL)==EFI_SUCCESS;
+ return Export(NULL,L"\\PS5UEFI.LOG")==EFI_SUCCESS;
 }
 int Value(int N){switch(N){case 0:return Writes;case 1:return Flushes;case 2:return Closes;case 3:return Opens;case 4:return Snapshots;default:return BadOpen;}}
 static EFI_STATUS EFIAPI Locate(EFI_LOCATE_SEARCH_TYPE T,EFI_GUID *G,VOID *K,UINTN *N,EFI_HANDLE **H){

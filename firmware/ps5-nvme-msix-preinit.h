@@ -192,9 +192,42 @@ STATIC VOID EFIAPI Ps5NvmePreinitAtEbs (IN EFI_EVENT Event, IN VOID *Context)
 }
 #endif
 
+/* r5.25.11 (HW 23.11. lab123: Windows after a restart ended in INACCESSIBLE_BOOT_DEVICE): back to the GameOS hand-over
+ * state of both views before the OS starts. A restart leaves the REAL function with Windows' MSI-X enabled and INTx
+ * disabled (ps5nvmsi armed it, no STOP/REMOVE at a restart), and the warm trampoline cleared bus mastering in the SHADOW
+ * (only the real function is turned on again by the firmware). ps5nvmsi needs the hand-over state: shadow decode + bus
+ * master on, MSI-X off in the real config. On a cold boot every value already matches and nothing is written. The
+ * firmware's NVMe driver polls, so the real MSI-X going off does not affect it. */
+STATIC VOID Ps5NvmeWarmHandover (VOID)
+{
+  if (PciExpressRead32 (PS5_NVME_REAL (0)) != PS5_NVME_ID || PS5_NVME_SHADOW32 (0) != PS5_NVME_ID) return;
+  UINTN Fixed = 0;
+  UINT16 SCmd = MmioRead16 ((UINTN)(PS5_NVME_ECAM + PS5_NVME_REAL (PCI_COMMAND_OFFSET)));
+  if ((SCmd & EFI_PCI_COMMAND_MEMORY_SPACE) && !(SCmd & EFI_PCI_COMMAND_BUS_MASTER)) {
+    MmioWrite16 ((UINTN)(PS5_NVME_ECAM + PS5_NVME_REAL (PCI_COMMAND_OFFSET)), (UINT16)(SCmd | EFI_PCI_COMMAND_BUS_MASTER)); Fixed |= 1;
+  }
+  UINT8 S = Ps5NvmeFindCap (0x11, TRUE);
+  if (S) {
+    UINT16 SCtl = MmioRead16 ((UINTN)(PS5_NVME_ECAM + PS5_NVME_REAL (S + 2)));
+    if (SCtl != 0xFFFF && (SCtl & BIT14)) { MmioWrite16 ((UINTN)(PS5_NVME_ECAM + PS5_NVME_REAL (S + 2)), (UINT16)(SCtl & ~BIT14)); Fixed |= 2; }
+  }
+  UINT8 R = Ps5NvmeFindCap (0x11, FALSE);
+  if (R) {
+    UINT16 RCtl = PciExpressRead16 (PS5_NVME_REAL (R + 2));
+    if (RCtl != 0xFFFF && (RCtl & (BIT15 | BIT14))) { PciExpressWrite16 (PS5_NVME_REAL (R + 2), (UINT16)(RCtl & ~(BIT15 | BIT14))); Fixed |= 4; }
+  }
+  UINT16 RCmd = PciExpressRead16 (PS5_NVME_REAL (PCI_COMMAND_OFFSET));
+  if (RCmd != 0xFFFF && (RCmd & BIT10)) { PciExpressWrite16 (PS5_NVME_REAL (PCI_COMMAND_OFFSET), (UINT16)(RCmd & ~BIT10)); Fixed |= 8; }
+  if (Fixed) {
+    DEBUG ((DEBUG_ERROR, "PS5 NVMe warm hand-over: restored (mask %x: 1 shadow bus master, 2 shadow MSI-X fn mask, 4 real MSI-X off, 8 real INTx)\n", (UINT32)Fixed));
+    Ps5NvmeLogViews ();
+  }
+}
+
 STATIC VOID Ps5RegisterNvmePreinit (VOID)
 {
   Ps5NvmeLogViews ();
+  Ps5NvmeWarmHandover ();
 #ifdef PS5_NVME_PREINIT_PROBE
   UINTN Fix = Ps5NvmeFixShadowMsix ();
   if (Fix == PS5_NVME_FIX_CORRUPT) {

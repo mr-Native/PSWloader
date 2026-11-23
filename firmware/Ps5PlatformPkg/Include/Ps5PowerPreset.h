@@ -27,4 +27,6 @@ typedef struct { UINT32 Value; } PS5_REFRESH;
 typedef struct { UINT8 Order[16]; } PS5_BOOT_LIST;
 #define PS5_USBCYCLE_KEY     0x136D   /* r5.25.1: Ps5UsbCycle 1 = power-cycle the USB ports once at start (default), 0 = off (volatile, persisted in \PS5UEFI.CFG) */
 typedef struct { UINT32 Value; } PS5_USBCYCLE;
+#define PS5_FASTRESTART_KEY  0x136E   /* r5.25.12: Ps5FastRestart 0 = a Windows restart shows the start screen (default), 1 = skips it (volatile, persisted in \PS5UEFI.CFG) */
+typedef struct { UINT32 Value; } PS5_FASTRESTART;
 #endif

@@ -62,6 +62,14 @@ STATIC EFI_STATUS Ps5NativeDpSource(VOID) {
           } }
         for(UINTN N=0;N<2;N++) Pci->Mem.Read(Pci,EfiPciIoWidthUint32,5,0x14004+0x200*N,1,&O[N]);
         DEBUG((DEBUG_ERROR,"PS5 DP source: warm re-entry - previous timing generator stopped, OTG=%x/%x\n",O[0],O[1]));
+        /* r5.25.11 (HW 23.11.: after a restart with bc250kmd the screen kept the last Windows frame, scaled, although the
+         * replay wrote the firmware surface): the KMD may leave OTG_MASTER_UPDATE_LOCK set, then no double-buffered pipe
+         * register (surface address, viewport, scaler) is ever taken over. Same OTG block as OTG_CONTROL above. */
+        for(UINTN N=0;N<2;N++){UINT32 L=0;
+          if(!EFI_ERROR(Pci->Mem.Read(Pci,EfiPciIoWidthUint32,5,0x1412C+0x200*N,1,&L))){
+            DEBUG((DEBUG_ERROR,"PS5 DP source: warm re-entry - OTG%u master update lock %x\n",(UINT32)N,L));
+            if(L&1){UINT32 Z=L&~1U;Pci->Mem.Write(Pci,EfiPciIoWidthUint32,5,0x1412C+0x200*N,1,&Z);}
+          }}
       } }
     /* Never overwrite a live timing pipeline or guess between two sinks. */
     if((O[0]|O[1])&1){Status=EFI_ALREADY_STARTED;break;}

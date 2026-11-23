@@ -14,7 +14,7 @@ class WindowsBootTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.work=tempfile.TemporaryDirectory();p=Path(cls.work.name)
-        source='static unsigned long long Ps5TestWarm[16];\n#define PS5_WARM_RECORD ((unsigned long long)(unsigned long)&Ps5TestWarm[0])\n#define PS5_WARM_LASTBOOT ((unsigned long long)(unsigned long)&Ps5TestWarm[8])\n#include "'+str(HERE/'Ps5BootWindows.c')+'"\n'+r'''
+        source='static unsigned long long Ps5TestWarm[16];\nstatic unsigned long long Ps5TestLogCell;\n#define PS5_WARM_LOGCELL ((unsigned long long)(unsigned long)&Ps5TestLogCell)\n#define PS5_WARM_RECORD ((unsigned long long)(unsigned long)&Ps5TestWarm[0])\n#define PS5_WARM_LASTBOOT ((unsigned long long)(unsigned long)&Ps5TestWarm[8])\n#include "'+str(HERE/'Ps5BootWindows.c')+'"\n'+r'''
 #include <stdlib.h>
 #include <string.h>
 static EFI_BOOT_SERVICES Bs;

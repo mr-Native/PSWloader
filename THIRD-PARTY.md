@@ -15,7 +15,7 @@ Our own code is BSD-2-Clause-Patent (see [LICENSE](LICENSE)) unless a file says 
 | `firmware/acpi/ps5-dsdt.asl` | Our own DSDT with the measured PCI windows, compiled into the stage 1 ACPI tables. The console's MADT and MCFG are read from your console when you build; they are not shipped | BSD-2-Clause-Patent |
 | `firmware/edk2/` | Changes to EDK2 | BSD-2-Clause-Patent, like EDK2 |
 | `firmware/lvgl-fonts/` | LVGL bitmap fonts generated with lv_font_conv (LVGL project, MIT) from Montserrat (Copyright The Montserrat Project Authors) and Font Awesome Free (Fonticons, Inc.) | SIL Open Font License 1.1 (fonts), MIT (LVGL font format) |
-| `pswloader/` | PSWloader, the GameOS payload that starts the firmware: a patch against [ps5-linux-loader](https://github.com/ps5-linux/ps5-linux-loader) commit e7954b27. The released `pswloader.elf` is built from that commit plus this patch | GPL-3.0 |
+| `pswloader/` | PSWloader, the GameOS payload that starts the firmware: a patch against [ps5-linux-loader](https://github.com/ps5-linux/ps5-linux-loader) commit badfe48. The released `PSWloader.elf` is built from that commit plus this patch | GPL-3.0 |
 | `gpu/` | Port of [amdgpu-wddm](https://github.com/D-Ogi/amdgpu-wddm) (kernel driver, D3D11 front-end, package); license, notices and third-party texts in `gpu/LICENSE.md`, `gpu/NOTICE`, `gpu/licenses/` | PolyForm Noncommercial 1.0.0 (decided 17 November 2026); Copyright (c) 2026 D-Ogi and PSWloader contributors |
 
 ## Not in this repo, fetched or provided by you
