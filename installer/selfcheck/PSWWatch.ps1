@@ -72,6 +72,15 @@ try {
     if ($letter) {
       mountvol "${letter}:" /s 2>$null | Out-Null
       if (Test-Path "${letter}:\") {
+        # the firmware writes its logs only into prepared slot files (16-byte marker + 64 KiB ring, it never creates files
+        # before Windows): create missing ones, so every later start and restart leaves its log here
+        foreach ($n in 'PS5UEFI.LOG', 'PS5WARM.LOG', 'PS5RESCU.LOG') {
+          $p = "${letter}:\$n"
+          if (-not (Test-Path $p)) {
+            $b = New-Object byte[] 65568; [Text.Encoding]::ASCII.GetBytes('PS5LOGFILE1').CopyTo($b, 0)
+            try { [IO.File]::WriteAllBytes($p, $b); W "     created the firmware log slot $n on the EFI partition" } catch { W "     could not create $n : $($_.Exception.Message)" }
+          }
+        }
         # the firmware has no reliable clock, so the file dates are useless: a log is copied when its content changed
         $tag = '{0:yyyy-MM-dd_HH-mm-ss}' -f $boot; $got = @(); $hashes = @{}
         if ($st -and $st.fwlogs) { foreach ($pr in $st.fwlogs.PSObject.Properties) { $hashes[$pr.Name] = $pr.Value } }

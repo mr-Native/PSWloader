@@ -1,9 +1,10 @@
 --- a/include/utils.h
 +++ b/include/utils.h
-@@ -150,6 +150,7 @@
+@@ -150,6 +150,8 @@
  int pin_to_first_available_core(void);
  void unpin(void);
  void notify(const char *fmt, ...);
++void psw_log(const char *fmt, ...);
 +void notify_banner(const char *msg);
  void notify_internal(uint8_t *msg);
  void enter_rest_mode(void);
@@ -103,7 +104,7 @@
  }
  
  void trim_newline(char *s) {
-@@ -118,59 +96,143 @@
+@@ -118,59 +96,146 @@
    }
  }
  
@@ -127,7 +128,7 @@
 +extern const unsigned char _psw_upl_start[], _psw_upl_end[];
 +
 +/* v1.0.5: version of a PSWloader firmware image = the patch number in its UTF-16 string "PSWloader v1.0.N"
-+ * ("PSWloader v1.0" alone = 0); -1 if the image carries no such string (unknown build, left alone). */
++ * ("PSWloader v1.0" alone = 0); -1 if the image carries no such string (build from before v1.0). */
 +static int psw_fw_version(const unsigned char *b, size_t n) {
 +  static const char tag[] = "PSWloader v1.0";
 +  size_t tl = sizeof(tag) - 1;
@@ -205,8 +206,11 @@
 +    if (tmp != MAP_FAILED) {
 +      if (read_file(initrd_path, tmp, tl) == (int)tl) {
 +        int ev = psw_fw_version(tmp, tl), bv = psw_fw_version(_psw_upl_start, (size_t)(_psw_upl_end - _psw_upl_start));
-+        if (ev >= 0 && bv >= 0 && ev < bv) {
-+          notify("PSWloader: older firmware v1.0.%d in %s ignored, using the built-in v1.0.%d\n", ev, initrd_path, bv);
++        /* v1.0.5-beta.2: a firmware without the version string (builds from before v1.0, e.g. /data/1360uefi/ps5-upl.bin
++         * of an early install) counts as older too - it has no restart support and was started instead of ours */
++        if (bv >= 0 && ev < bv) {
++          if (ev >= 0) notify("PSWloader: older firmware v1.0.%d in %s ignored, using the built-in v1.0.%d\n", ev, initrd_path, bv);
++          else notify("PSWloader: old firmware without version in %s ignored, using the built-in v1.0.%d\n", initrd_path, bv);
 +          use_emb_upl = 1; use_emb_kernel = 1;
 +        }
 +      }
@@ -294,7 +298,14 @@
    char buf_vram[16] = {};
 --- a/source/main.c
 +++ b/source/main.c
-@@ -13,7 +13,7 @@
+@@ -1,3 +1,6 @@
++#ifndef PSW_RELEASE_DATE
++#define PSW_RELEASE_DATE "2026-11-23"
++#endif
+ #include "hv_defeat_0304.h"
+ #include "hv_defeat_0506.h"
+ #include "hv_defeat_0607.h"
+@@ -13,7 +16,7 @@
  // files are staged, so it must not exit after that.
  static int fail_after_staging(void) {
    if (PS5_FW_IS_11XX(fw)) {
@@ -303,13 +314,16 @@
      while (1)
        sleep(30);
    }
-@@ -21,14 +21,17 @@
+@@ -21,24 +24,33 @@
  }
  
  int main(void) {
 +  /* PSWloader v1.0 (17.11.2026, user request): name and version first */
-+  notify_banner("Welcome to PSWloader!\nv1.0.5\n");
++  /* 2026-11-23 (user): the ELF carries a release date, no version - it stays the same across firmware updates (the firmware
++   * updates itself from the EFI partition, written by the Windows updater) */
++  notify_banner("Welcome to PSWloader!\nRelease " PSW_RELEASE_DATE "\n");
 +
++  psw_log("---- PSWloader.elf release %s started\n", PSW_RELEASE_DATE);
    if (setup_env()) {
 -    notify("Something went wrong while initiating.\nPlease make sure your fw "
 -           "is supported.");
@@ -318,32 +332,91 @@
      return -1;
    }
  
++  psw_log("system software %x.%02x, environment ready\n", fw >> 8, fw & 0xFF);
    if (fetch_linux(&linux_i)) {
 -    notify("Something went wrong while installing linux files.\n");
 +    notify("PSWloader: failed to stage firmware files.\n");
      return -1;
    }
  
-@@ -59,11 +62,12 @@
+   void *shellcode_kernel;
+   size_t shellcode_kernel_len;
++  psw_log("firmware staged, preparing the resume path\n");
+   if (prepare_resume(&shellcode_kernel, &shellcode_kernel_len)) {
+     notify("Something went wrong while preparing resume.\n");
+     return fail_after_staging();
+   }
+ 
++  psw_log("resume path ready, hypervisor step for %x.%02x starts\n", fw >> 8, fw & 0xFF);
+   if ((0x0300 <= fw) && (fw < 0x0500)) {
+     if (hv_defeat_0304(shellcode_kernel, shellcode_kernel_len))
+       goto err;
+@@ -59,11 +71,14 @@
      goto err;
    }
  
 -  notify("Finished preparation. Going to rest mode in 5 seconds.\nPlease wait "
 -         "for the orange light to stop "
 -         "blinking and then wakeup to Linux :)\n");
+-
+-  sleep(5);
 +  /* PSWloader v1.0.3 (18.11.2026, user): the messages stay separate as before; GameOS shows them one after the other,
 +   * so the last one was still on screen when the 5 s were over - the wait is 7 s now (announced as such). */
 +  notify_banner("Starting UEFI Boot Manager in 7 seconds...\n");
 +  notify_banner("When the orange light stays on, wake the console from rest mode.\n");
- 
--  sleep(5);
++
++  psw_log("hypervisor step done, rest mode in 7 s - the firmware starts when the console is woken\n");
 +  sleep(7);
++  psw_log("entering rest mode now\n");
    enter_rest_mode();
  
    while (1) {
 --- a/source/utils.c
 +++ b/source/utils.c
-@@ -364,10 +364,20 @@
+@@ -356,6 +356,42 @@
+   cpuset_setaffinity(3, 1, -1, 0x10, (const cpuset_t *)m);
+ }
+ 
++/* 2026-11-23 (support: "the console turns off after the payload" - not traceable): every step goes to pswloader-elf.log
++ * in /data/pswloader/ and in a PSW/ folder on USB drives 0-3, written with fsync at once - when the console stops in the
++ * middle, the last line says where. The file starts again when it is larger than 256 KiB. */
++#include <fcntl.h>
++#include <time.h>
++void psw_log(const char *fmt, ...) {
++  static const char *const dirs[] = {"/data/pswloader/", "/mnt/usb0/PSW/", "/mnt/usb1/PSW/", "/mnt/usb2/PSW/", "/mnt/usb3/PSW/"};
++  static int first = 1;
++  char line[1024], path[96];
++  struct stat st;
++  time_t now = time(NULL);
++  struct tm tmv;
++  gmtime_r(&now, &tmv);
++  int n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d UTC  ", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
++                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
++  va_list args;
++  va_start(args, fmt);
++  if (n > 0 && n < (int)sizeof(line)) vsnprintf(line + n, sizeof(line) - (size_t)n, fmt, args);
++  va_end(args);
++  size_t len = strlen(line);
++  if (len && line[len - 1] != '\n' && len + 1 < sizeof(line)) { line[len++] = '\n'; line[len] = 0; }
++  if (first) mkdir("/data/pswloader", 0777);
++  for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
++    if (stat(dirs[i], &st) != 0 || !S_ISDIR(st.st_mode)) continue;
++    snprintf(path, sizeof(path), "%spswloader-elf.log", dirs[i]);
++    int flags = O_WRONLY | O_CREAT | O_APPEND;
++    if (first && stat(path, &st) == 0 && st.st_size > 256 * 1024) flags |= O_TRUNC;
++    int fd = open(path, flags, 0644);
++    if (fd < 0) continue;
++    (void)write(fd, line, len);
++    fsync(fd);
++    close(fd);
++  }
++  first = 0;
++}
++
+ void notify(const char *fmt, ...) {
+   static char buffer[2048];
+   va_list args;
+@@ -364,8 +400,20 @@
    vsnprintf(buffer, sizeof(buffer), fmt, args);
    va_end(args);
  
@@ -354,14 +427,14 @@
 +      strstr(buffer, "Only the retail") || strstr(buffer, "Could not"))
 +    notify_internal((uint8_t *)buffer);
    printf("%s", buffer);
- }
- 
++  psw_log("%s", buffer);
++}
++
 +/* The one message the user sees on the normal path. */
 +void notify_banner(const char *msg) {
 +  notify_internal((uint8_t *)msg);
 +  printf("%s", msg);
-+}
-+
++  psw_log("%s", msg);
+ }
+ 
  void notify_internal(uint8_t *msg) {
-   struct {
-     char pad[45];

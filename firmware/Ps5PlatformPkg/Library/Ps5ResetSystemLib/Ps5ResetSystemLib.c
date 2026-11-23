@@ -471,19 +471,40 @@ STATIC VOID WarmPciSnapshot (VOID) {
   if (mWarmPciN >= PS5W_PCI_MAX) *(volatile UINT32 *)(UINTN)PS5W_PCI_LIST = 0xFFFFFFFE;   /* too many: replay nothing */
   DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: PCI hand-over state %u writes\n", (UINT32)mWarmPciN));
 }
+/* r5.25.13 firmware self-update (user: the ELF stays, later updates only replace the firmware from Windows): the BDS of the
+ * running firmware loads a newer \PSWloader\firmware\pswloader-upl.bin from the EFI partition to PS5W_UPD_IMAGE (unused part of
+ * the reserved arena, kept by every re-entry) and restarts into it through the warm re-entry. The cell tells both sides:
+ * [0] "PSWUPDT1", [1] container address, [2] container bytes, [3] state 1 = re-enter into it now, 2 = it is the running one. */
+#define PS5W_UPD_CELL  0x111806480ULL
+#define PS5W_UPD_IMAGE 0x111100000ULL
+#define PS5W_UPD_MAX   0x700000ULL
+STATIC BOOLEAN WarmContainerOk (UINT64 A, UINT64 Limit, UINT64 *Bytes, UINT64 *Entry) {
+  CONST UINT8 *H = (CONST UINT8 *)(UINTN)A;
+  if (CompareMem (H, "PS5UPL01", 8) != 0 || *(CONST UINT32 *)(H + 12) != 4096 || *(CONST UINT64 *)(H + 16) != PS5W_IMAGE_BASE) return FALSE;
+  if (WarmCrc32 (H, 4092) != *(CONST UINT32 *)(H + 4092)) return FALSE;
+  UINT64 B = *(CONST UINT64 *)(H + 24);
+  if (!B || B > SIZE_32MB || A + 4096 + B > Limit) return FALSE;
+  if (WarmCrc32 (H + 4096, (UINTN)B) != *(CONST UINT32 *)(H + 44)) return FALSE;
+  *Bytes = B; *Entry = *(CONST UINT64 *)(H + 32);
+  return TRUE;
+}
 STATIC VOID WarmPrepare (VOID) {
   *(volatile UINT64 *)(UINTN)0x1118061A0ULL = 0;   /* r5.25.5: no stale "cold restart" request from an earlier run */
-  /* 1. untouched firmware container in the reserved arena */
+  /* 1. untouched firmware container in the reserved arena; r5.25.13: an updated firmware that is running now first */
   UINT64 Src = 0, Bytes = 0, Entry = 0;
-  for (UINT64 A = PS5W_ARENA_LO; A < PS5W_ARENA_HI && !Src; A += EFI_PAGE_SIZE) {
-    CONST UINT8 *H = (CONST UINT8 *)(UINTN)A;
-    if (CompareMem (H, "PS5UPL01", 8) != 0 || *(CONST UINT32 *)(H + 12) != 4096 || *(CONST UINT64 *)(H + 16) != PS5W_IMAGE_BASE) continue;
-    if (WarmCrc32 (H, 4092) != *(CONST UINT32 *)(H + 4092)) continue;
-    Bytes = *(CONST UINT64 *)(H + 24); Entry = *(CONST UINT64 *)(H + 32);
-    if (!Bytes || Bytes > SIZE_32MB || A + 4096 + Bytes > PS5W_ARENA_HI) continue;
-    if (WarmCrc32 (H + 4096, (UINTN)Bytes) != *(CONST UINT32 *)(H + 44)) continue;
-    Src = A;
+  { volatile UINT64 *U = (volatile UINT64 *)(UINTN)PS5W_UPD_CELL;
+    /* only in a re-entry (the trampoline's record "PSWWARM1" is still there at this early point): after a start from
+     * GameOS the cell may hold an older session's values - the BDS decides about an update again */
+    BOOLEAN ReEntry = *(volatile UINT64 *)(UINTN)0x111806040ULL == 0x314D524157575350ULL;
+    if (!ReEntry) U[0] = 0;
+    if (U[0] == 0x3154445055575350ULL && U[3] == 2 && U[1] == PS5W_UPD_IMAGE &&
+        WarmContainerOk (PS5W_UPD_IMAGE, PS5W_UPD_IMAGE + PS5W_UPD_MAX, &Bytes, &Entry)) {
+      Src = PS5W_UPD_IMAGE;
+      DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: restarts use the updated firmware at %Lx\n", Src));
+    } else if (U[0] == 0x3154445055575350ULL && U[3] != 2) U[0] = 0;   /* a re-entry request that never ran */
   }
+  for (UINT64 A = PS5W_ARENA_LO; A < PS5W_ARENA_HI && !Src; A += EFI_PAGE_SIZE)
+    if (WarmContainerOk (A, PS5W_ARENA_HI, &Bytes, &Entry)) Src = A;
   if (!Src) { DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: firmware container not found - restarts go through GameOS\n")); return; }
   /* 2. bootstrap HOB list: PHIT + HOBs up to the first end HOB */
   CONST UINT8 *Hob = (CONST UINT8 *)(UINTN)PS5W_HOB_BASE; UINTN Off = 0, HobLen = 0;
@@ -665,6 +686,16 @@ STATIC VOID WarmReentry (VOID) {
    * ResetCold then falls through to Power (TRUE). Before EBS only: afterwards the arena is not mapped for runtime code. */
   if (!mWarmEbs && *(volatile UINT64 *)(UINTN)0x1118061A0ULL == 0x31444C4F43575350ULL) return;   /* "PSWCOLD1" */
   WarmReadOsRequest ((PS5_WARM_PARAMS *)(UINTN)(mWarmVa + mWarmParOff));
+  if (!mWarmEbs) {   /* r5.25.13: the BDS asked to start an updated firmware (before EBS only, the arena is mapped 1:1 then) */
+    volatile UINT64 *U = (volatile UINT64 *)(UINTN)PS5W_UPD_CELL; UINT64 B = 0, E = 0;
+    if (U[0] == 0x3154445055575350ULL && U[3] == 1 && U[1] == PS5W_UPD_IMAGE &&
+        WarmContainerOk (PS5W_UPD_IMAGE, PS5W_UPD_IMAGE + PS5W_UPD_MAX, &B, &E)) {
+      PS5_WARM_PARAMS *P = (PS5_WARM_PARAMS *)(UINTN)(mWarmVa + mWarmParOff);
+      P->ImgSrc = PS5W_UPD_IMAGE + 4096; P->ImgLen = B; P->Entry = E;
+      P->NextFlags = (1ULL << 48) | 4;   /* bit 2: an update run - the new firmware starts like after power-on */
+      U[3] = 2;
+    }
+  }
   WarmTakeFramebuffer ();
   /* r5.25.5 (HW 19.11.: a restart from Windows hung dark right away): after the OS the framebuffer belongs to a GPU the OS
    * may have left in D3 - no breadcrumb bars and no lab squares there (only the firmware self-test before EBS paints) */

@@ -6,8 +6,22 @@ Existing Windows 11 installations can be updated in-place without reinstalling W
 
 1. Download `pswloader-vX.Y.Z-Updater.zip` from the [Releases](../../releases) page and extract the entire archive.
 2. Run `PSWUpdater-vX.Y.Z.exe` as Administrator.
-3. Confirm the version upgrade prompt. If the release also updated `PSWloader.elf`, the updater will let you know before starting — you can replace `PSWloader.elf` (and `PSWloader.elf.json`) in your PS5 Payload Manager after the reboot at the end of the update.
+3. Confirm the version upgrade prompt.
 4. When the update finishes, confirm the restart prompt to load the updated drivers.
+
+## Firmware updates without replacing PSWloader.elf
+
+Since the PSWloader.elf release of 2026-11-23 the ELF no longer has to be replaced for firmware updates. The updater puts
+the new firmware on the EFI partition (`\PSWloader\firmware\pswloader-upl.bin`). At the next start the firmware built
+into the ELF sees the newer one there and switches to it; Windows restarts then use it directly.
+
+If the new firmware does not reach the Windows start twice in a row, it is ignored (`\PSWloader\firmware\update.txt`
+says `failed`) and the built-in firmware keeps working. Deleting the `\PSWloader\firmware` folder goes back to the
+built-in firmware.
+
+Replace `PSWloader.elf` only when a release says so (for example for new GameOS system software). Older ELFs (v1.0.5 and
+earlier) do not have this: with them, replace `PSWloader.elf` once with the 2026-11-23 release.
+
 
 Every run writes a log to:
 

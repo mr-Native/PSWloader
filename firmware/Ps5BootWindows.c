@@ -22,6 +22,7 @@
 #include <Library/UefiLib.h>
 #include <Protocol/SimpleTextOut.h>
 #include "ps5-time-calendar.h"
+#define PS5_FW_RELEASE "r5.25.13"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG, r5.25.13: SMBIOS BIOS version); bump with every build */
 #include "ps5-extapic.h"
 #ifdef PS5_WARM_BS_TRACE
 #include "ps5-bs-trace.h"
@@ -40,7 +41,6 @@ STATIC BOOLEAN mPs5BsTraceWarm;   /* lab: set by Ps5WarmReadRecord on a warm run
 #endif
 #define PS5_BRAND_TITLE L"PSWloader"   /* r5.17: product name (user 17.11.2026) */
 #define PS5_BRAND_VERSION L"v1.0.5"
-#define PS5_FW_RELEASE "r5.25.12"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG); bump with every build */
 #if PS5_QUIET_SCREEN
 #define PS5_SCREEN(...) do{CHAR16 Ps5Q_[256];UnicodeSPrint(Ps5Q_,sizeof(Ps5Q_),__VA_ARGS__);DEBUG((DEBUG_INFO,"PS5 screen (quiet): %s",Ps5Q_));}while(0)
 #else
@@ -547,6 +547,7 @@ STATIC BOOLEAN mPs5WarmDirect, mPs5WarmDirectHit, mPs5WarmNotified;
 #define PS5_WARM_LASTUSB 0x0031425355575350ULL
 #define PS5_WARM_USB_WAIT_ATTEMPTS 600U   /* x 100 ms */
 STATIC BOOLEAN mPs5WarmUsb;
+STATIC BOOLEAN mPs5UpdateRun;   /* r5.25.13: this firmware was started by an older one as its update (bit 2 of the record) */
 /* r5.25.5: a warm re-entry that cannot boot its target restarts cold through GameOS (ICC) - no BDS fallback */
 STATIC VOID Ps5WarmColdRestart(CONST CHAR8 *Why)
 {
@@ -706,6 +707,11 @@ STATIC VOID Ps5WarmReadRecord(VOID)
   *(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL=0x31474F4C4D524157ULL;   /* "WARMLOG1" */
   UINT64 Flags=R[1];
   R[0]=0;
+  if(Flags&4) {   /* r5.25.13: started as a firmware update - behave like a start from GameOS (start screen, no direct boot) */
+    mPs5UpdateRun=TRUE;
+    DEBUG((DEBUG_ERROR,"PS5 firmware update: running %a, started by the built-in firmware\n",PS5_FW_RELEASE));
+    return;
+  }
   if(Flags&1) {
 #ifdef PS5_NATIVE_SETUP
     mPs5ForceSetup=TRUE;
@@ -763,6 +769,96 @@ STATIC EFI_STATUS Ps5SetRename(EFI_FILE_PROTOCOL *Root,CHAR16 *From,CHAR16 *To) 
 }
 STATIC VOID Ps5SetDelete(EFI_FILE_PROTOCOL *Root,CHAR16 *Name) {
   EFI_FILE_PROTOCOL *F=NULL;if(!EFI_ERROR(Root->Open(Root,&F,Name,EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0)))F->Delete(F);
+}
+/* r5.25.13 firmware self-update (user: PSWloader.elf stays, Windows updates only the firmware). The updater puts the new
+ * \PSWloader\firmware\pswloader-upl.bin (PS5UPL01 container, the same file as on the USB stick) on the EFI partition. A
+ * firmware that finds a NEWER revision there (marker "PSWFWREV:rA.B.C") copies it to the unused arena part 0x1_1110_0000
+ * and restarts into it through the warm re-entry (Ps5ResetSystemLib, cell PSWUPDT1); later Windows restarts start it
+ * directly. \PSWloader\firmware\update.txt guards against a bad file: "pending <crc> <n>" before the switch, "ok <crc>" when
+ * the new firmware reaches the Windows start, "failed <crc>" after two starts that never got there - then the file is ignored
+ * and the built-in firmware keeps running. */
+#define PS5_UPD_CELL  0x111806480ULL
+#define PS5_UPD_IMAGE 0x111100000ULL
+#define PS5_UPD_MAX   0x700000U
+#define PS5_UPD_FILE  L"\\PSWloader\\firmware\\pswloader-upl.bin"
+#define PS5_UPD_STATE L"\\PSWloader\\firmware\\update.txt"
+__attribute__((used)) STATIC CONST CHAR8 mPs5FwRevMarker[]="PSWFWREV:" PS5_FW_RELEASE;
+STATIC UINT32 Ps5RevValue(CONST CHAR8 *R) {   /* "r5.25.13" -> 0x0005190D (major.minor.patch, 0 = unreadable) */
+  UINT32 V[3]={0,0,0},I=0,D=0;
+  if(*R!='r')return 0;
+  for(R++;*R && I<3;R++){ if(*R>='0'&&*R<='9'){V[I]=V[I]*10+(UINT32)(*R-'0');D=1;} else if(*R=='.'&&D){I++;D=0;} else break; }
+  return (V[0]<<16)|(V[1]<<8)|(V[2]&0xFF);
+}
+STATIC VOID Ps5UpdState(EFI_FILE_PROTOCOL *Root,CONST CHAR8 *Text) {
+  EFI_FILE_PROTOCOL *F=NULL;
+  Ps5SetDelete(Root,PS5_UPD_STATE);
+  if(!EFI_ERROR(Root->Open(Root,&F,PS5_UPD_STATE,EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,0))){
+    UINTN N=AsciiStrLen(Text);F->Write(F,&N,(VOID *)Text);F->Flush(F);F->Close(F);
+  }
+}
+STATIC VOID Ps5FirmwareSelfUpdate(EFI_HANDLE Esp)
+{
+  volatile UINT64 *U=(volatile UINT64 *)(UINTN)PS5_UPD_CELL;
+  if(Esp==NULL || mPs5UpdateRun)return;
+  EFI_FILE_PROTOCOL *Root=Ps5PresetRoot(Esp),*F=NULL;
+  if(Root==NULL)return;
+  if(EFI_ERROR(Root->Open(Root,&F,PS5_UPD_FILE,EFI_FILE_MODE_READ,0))){Root->Close(Root);return;}
+  UINTN Size=PS5_UPD_MAX;UINT8 *Img=(UINT8 *)(UINTN)PS5_UPD_IMAGE;
+  EFI_STATUS S=F->Read(F,&Size,Img);F->Close(F);
+  CHAR8 Why[64]="";UINT32 Crc=0,Have=Ps5RevValue(PS5_FW_RELEASE),Want=0;CHAR8 WantText[16]="?";
+  if(EFI_ERROR(S) || Size<8192 || Size>=PS5_UPD_MAX)AsciiStrCpyS(Why,sizeof(Why),"unreadable or too large");
+  else if(CompareMem(Img,"PS5UPL01",8)!=0 || *(UINT32 *)(Img+12)!=4096 || *(UINT64 *)(Img+16)!=0x41000000ULL ||
+          *(UINT64 *)(Img+24)+4096>Size)AsciiStrCpyS(Why,sizeof(Why),"not a PSWloader firmware");
+  else {
+    UINT32 H=0,B=0;gBS->CalculateCrc32(Img,4092,&H);gBS->CalculateCrc32(Img+4096,(UINTN)*(UINT64 *)(Img+24),&B);
+    if(H!=*(UINT32 *)(Img+4092) || B!=*(UINT32 *)(Img+44))AsciiStrCpyS(Why,sizeof(Why),"checksum mismatch");
+    else {
+      Crc=B;
+      for(UINTN I=4096;I+24<Size;I++) if(Img[I]=='P' && CompareMem(Img+I,"PSWFWREV:r",10)==0 && Img[I+10]>='0' && Img[I+10]<='9') {   /* digit: not this search string */
+        UINTN J=0;for(;J<15 && Img[I+9+J]>' ' && Img[I+9+J]<0x7F;J++)WantText[J]=(CHAR8)Img[I+9+J];
+        WantText[J]=0;Want=Ps5RevValue(WantText);break;
+      }
+      if(!Want)AsciiStrCpyS(Why,sizeof(Why),"no revision marker");
+      else if(Want<=Have)AsciiStrCpyS(Why,sizeof(Why),"not newer");
+    }
+  }
+  if(Why[0]){
+    DEBUG((DEBUG_ERROR,"PS5 firmware update: %s skipped (%a; file %a, running %a)\n",PS5_UPD_FILE,Why,WantText,mPs5FwRevMarker+9));
+    Root->Close(Root);return;
+  }
+  CHAR8 St[64];UINTN N=Ps5SetReadFile(Root,PS5_UPD_STATE,St,sizeof(St));CHAR8 Tag[16];UINT32 Tries=0;
+  AsciiSPrint(Tag,sizeof(Tag),"%08x",Crc);
+  if(N && AsciiStrStr(St,"failed") && AsciiStrStr(St,Tag)){
+    DEBUG((DEBUG_ERROR,"PS5 firmware update: %a (%a) failed before - keeping %a\n",WantText,Tag,PS5_FW_RELEASE));
+    Root->Close(Root);return;
+  }
+  if(N && AsciiStrStr(St,"pending") && AsciiStrStr(St,Tag)){
+    CHAR8 *P=AsciiStrStr(St,Tag)+8;while(*P==' ')P++;while(*P>='0'&&*P<='9')Tries=Tries*10+(UINT32)(*P++-'0');
+  }
+  if(Tries>=2){
+    CHAR8 Line[48];AsciiSPrint(Line,sizeof(Line),"failed %a %a\r\n",Tag,WantText);Ps5UpdState(Root,Line);
+    DEBUG((DEBUG_ERROR,"PS5 firmware update: %a never reached the Windows start (%u tries) - marked failed, keeping %a\n",WantText,Tries,PS5_FW_RELEASE));
+    Root->Close(Root);return;
+  }
+  { CHAR8 Line[48];AsciiSPrint(Line,sizeof(Line),"pending %a %u %a\r\n",Tag,Tries+1,WantText);Ps5UpdState(Root,Line); }
+  Root->Close(Root);
+  { EFI_BLOCK_IO_PROTOCOL *Bio=NULL;
+    if(!EFI_ERROR(gBS->HandleProtocol(Esp,&gEfiBlockIoProtocolGuid,(VOID **)&Bio)) && Bio!=NULL && Bio->FlushBlocks!=NULL)Bio->FlushBlocks(Bio); }
+  U[1]=PS5_UPD_IMAGE;U[2]=Size;U[3]=1;U[0]=0x3154445055575350ULL;   /* "PSWUPDT1" */
+  AsmWbinvd();
+  DEBUG((DEBUG_ERROR,"PS5 firmware update: starting %a from the EFI partition (running %a, %u bytes, crc %a)\n",WantText,PS5_FW_RELEASE,(UINT32)Size,Tag));
+  gRT->ResetSystem(EfiResetCold,EFI_SUCCESS,0,NULL);
+  U[0]=0;   /* only if the re-entry was not prepared (then ResetSystem would have switched off already) */
+}
+/* r5.25.13: the updated firmware reached the Windows start - confirm it */
+STATIC VOID Ps5FirmwareUpdateConfirm(EFI_HANDLE Esp)
+{
+  volatile UINT64 *U=(volatile UINT64 *)(UINTN)PS5_UPD_CELL;
+  if(!mPs5UpdateRun || Esp==NULL || U[0]!=0x3154445055575350ULL)return;
+  EFI_FILE_PROTOCOL *Root=Ps5PresetRoot(Esp);if(Root==NULL)return;
+  CHAR8 Line[48];AsciiSPrint(Line,sizeof(Line),"ok %08x %a\r\n",*(UINT32 *)(UINTN)(PS5_UPD_IMAGE+44),PS5_FW_RELEASE);
+  Ps5UpdState(Root,Line);Root->Close(Root);
+  DEBUG((DEBUG_ERROR,"PS5 firmware update: %a confirmed (reached the Windows start)\n",PS5_FW_RELEASE));
 }
 /* r5.15.2: the ESP that owns \PS5UEFI.CFG = the internal one that would boot without bootorder=usb (unpinned internal,
  * else the unique non-removable pinned ESP). NULL = no internal Windows (empty target): settings live on the selected medium.
@@ -1138,6 +1234,7 @@ STATIC EFI_STATUS Ps5LaunchWindows(EFI_HANDLE Selected)
       L[0]=0x315453414C575350ULL;
     } }
   Ps5PowerPresetSave(mPs5ConfigEsp?mPs5ConfigEsp:Selected);      /* r5.6: only if changed in the menu; r5.15.2: config ESP */
+  Ps5FirmwareUpdateConfirm(mPs5ConfigEsp?mPs5ConfigEsp:Selected); /* r5.25.13 */
   Ps5InstallPStateSsdt();                                        /* r5.12: only with pstates=1 */
 #ifdef PS5_LAB_SANDISK
   Ps5LabSanDiskDefault(Selected);
@@ -1854,6 +1951,9 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
 #endif
     if (Selected!=NULL) {
       PS5_TS("boot-medium-found");
+#ifdef PS5_NATIVE_SETUP
+      Ps5FirmwareSelfUpdate(mPs5ConfigEsp?mPs5ConfigEsp:Selected);   /* r5.25.13: returns only if nothing newer to start */
+#endif
 #ifdef PS5_USB_MASS_QUIET
       /* r5 (16.11.): booting from the internal NVMe ESP - stop UsbMassStorageDxe from binding further USB disks
        * (flaky bridges/card readers ran INQUIRY timeouts for 40+ s each in the EDID window and before bootmgr). USB HID

@@ -53,6 +53,11 @@ STATIC VOID Ps5AddSmbiosString (UINT8 **P, CONST CHAR8 *S)
 {
   UINTN L = AsciiStrLen (S); CopyMem (*P, S, L); *P += L; *(*P)++ = 0;
 }
+#ifdef PS5_FW_RELEASE
+#define PS5_FW_RELEASE_SMBIOS PS5_FW_RELEASE
+#else
+#define PS5_FW_RELEASE_SMBIOS "?"
+#endif
 STATIC VOID Ps5CpuNameSmbios (VOID)
 {
   EFI_SMBIOS_PROTOCOL *Smbios = NULL;
@@ -69,7 +74,7 @@ STATIC VOID Ps5CpuNameSmbios (VOID)
     T0->SystemBiosMajorRelease = 1; T0->SystemBiosMinorRelease = 0;
     T0->EmbeddedControllerFirmwareMajorRelease = 0xFF; T0->EmbeddedControllerFirmwareMinorRelease = 0xFF;
     UINT8 *P0 = Buf + T0->Hdr.Length;
-    Ps5AddSmbiosString (&P0, "PSWloader"); Ps5AddSmbiosString (&P0, "PSWloader v1.0.5"); Ps5AddSmbiosString (&P0, "11/22/2026"); *P0++ = 0;
+    Ps5AddSmbiosString (&P0, "PSWloader"); Ps5AddSmbiosString (&P0, "PSWloader v1.0.5 (" PS5_FW_RELEASE_SMBIOS ")"); Ps5AddSmbiosString (&P0, "11/22/2026");   /* r5.25.13: firmware revision in the version (support zip, dxdiag) */ *P0++ = 0;
     H = SMBIOS_HANDLE_PI_RESERVED;
     Status = Smbios->Add (Smbios, NULL, &H, (EFI_SMBIOS_TABLE_HEADER *)Buf);
     DEBUG ((DEBUG_ERROR, "PS5 name: SMBIOS type 0 add %r (handle %x)\n", Status, H));

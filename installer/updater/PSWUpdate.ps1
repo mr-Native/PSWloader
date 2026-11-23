@@ -363,6 +363,31 @@ if (Test-Path $FwSrc) {
     LogInfo "No firmware directory in payload, skipping."
 }
 
+# 6b. v1.0.5: firmware for the next start on the EFI partition. The running firmware starts a newer
+#     \PSWloader\firmware\pswloader-upl.bin by itself, so PSWloader.elf does not have to be replaced for firmware updates.
+$uplSrc = Join-Path $FwSrc 'pswloader-upl.bin'
+if (Test-Path $uplSrc) {
+    $letter = $null
+    foreach ($c in [char[]]'SRQPONMLKJIHGT') { if (-not (Test-Path "${c}:\")) { $letter = $c; break } }
+    if ($letter) {
+        try {
+            $mp = Start-Process -FilePath "$env:SystemRoot\System32\mountvol.exe" -ArgumentList "${letter}: /S" -NoNewWindow -Wait -PassThru
+            if ($mp.ExitCode -eq 0 -and (Test-Path "${letter}:\")) {
+                $fwDir = "${letter}:\PSWloader\firmware"
+                New-Item -ItemType Directory -Path $fwDir -Force | Out-Null
+                Copy-Item -Path $uplSrc -Destination "$fwDir\pswloader-upl.bin.new" -Force   # copy first, then swap: never a half file
+                if ((Get-FileHash "$fwDir\pswloader-upl.bin.new").Hash -ne (Get-FileHash $uplSrc).Hash) { throw 'copy check failed' }
+                Move-Item -Path "$fwDir\pswloader-upl.bin.new" -Destination "$fwDir\pswloader-upl.bin" -Force
+                LogOk "Firmware for the next start placed on the EFI partition (\PSWloader\firmware\pswloader-upl.bin)"
+            } else { LogWarn "EFI partition not reachable - the firmware update needs the new PSWloader.elf" }
+        } catch {
+            LogWarn "Could not place the firmware on the EFI partition: $_"
+        } finally {
+            Start-Process -FilePath "$env:SystemRoot\System32\mountvol.exe" -ArgumentList "${letter}: /D" -NoNewWindow -Wait | Out-Null
+        }
+    }
+}
+
 # 7. Install / refresh silent boot-time auto-update checker (preserves user config)
 try {
     $chkSrc = Join-Path (Join-Path $Root 'engine') 'PSWUpdateCheck.ps1'
