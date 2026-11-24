@@ -11,6 +11,7 @@
 #include <Protocol/BlockIo.h>
 #include <Protocol/BlockIo2.h>
 #include <Protocol/DevicePath.h>
+#include <Protocol/UsbIo.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/DevicePathLib.h>
@@ -22,7 +23,7 @@
 #include <Library/UefiLib.h>
 #include <Protocol/SimpleTextOut.h>
 #include "ps5-time-calendar.h"
-#define PS5_FW_RELEASE "r5.25.13"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG, r5.25.13: SMBIOS BIOS version); bump with every build */
+#define PS5_FW_RELEASE "r5.25.23"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG, r5.25.13: SMBIOS BIOS version); bump with every build */
 #include "ps5-extapic.h"
 #ifdef PS5_WARM_BS_TRACE
 #include "ps5-bs-trace.h"
@@ -382,6 +383,7 @@ STATIC BOOLEAN mRecoverSilent;   /* r5.25: early usbpowercycle run: log lines on
 STATIC UINT64 mPs5CycleTsc;        /* r5.25.3: TSC of the last power cycle that cut a 0-byte USB disk (0 = none) */
 STATIC UINTN  mPs5CycleWant;       /* r5.25.3: working USB disks expected after it (working before + cycled 0-byte disks) */
 STATIC BOOLEAN mPs5CycleOnlyZero;  /* r5.25.4: menu entry - cycle only ports with a 0-byte USB disk, nothing else */
+STATIC BOOLEAN mPs5ForceCycle;     /* r5.25.23: warm USB target missing - cycle even a controller that carries a working disk */
 STATIC UINTN Ps5UsbWorkingDisks(VOID)   /* whole-disk BlockIo behind USB with a size */
 {
   EFI_HANDLE *H=NULL;UINTN N=0,C=0;
@@ -404,12 +406,45 @@ STATIC UINT32 Ps5RootPortOf (EFI_DEVICE_PATH_PROTOCOL *Dp, EFI_DEVICE_PATH_PROTO
   if (DevicePathType(Nx)!=MESSAGING_DEVICE_PATH || DevicePathSubType(Nx)!=MSG_USB_DP) return 0;
   return (UINT32)((USB_DEVICE_PATH *)Nx)->ParentPortNumber+1;
 }
+/* r5.25.20: every xHCI root port in the log - PORTSC (speed id 3 = 480 Mbit/s, 4 = 5 Gbit/s, 5 = 10 Gbit/s; link state)
+ * and the link error count of USB 3 ports (PORTLI bits 0-15) - a weak USB 3 link shows here (HW 23./24.11.) */
+STATIC VOID Ps5LogUsbPorts (CONST CHAR8 *When)
+{
+  EFI_HANDLE *Pci=NULL; UINTN N=0; UINT32 Hc=0;
+  if (EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiPciIoProtocolGuid,NULL,&N,&Pci))) return;
+  for (UINTN I=0; I<N; I++) {
+    EFI_PCI_IO_PROTOCOL *Io=NULL; UINT8 Class[3]={0}; UINT32 Cap=0,Params=0;
+    if (EFI_ERROR(gBS->HandleProtocol(Pci[I],&gEfiPciIoProtocolGuid,(VOID **)&Io)) ||
+        EFI_ERROR(Io->Pci.Read(Io,EfiPciIoWidthUint8,0x09,3,Class)) ||
+        Class[2]!=0x0c || Class[1]!=0x03 || Class[0]!=0x30) continue;
+    UINT32 Id=Hc++;
+    if (EFI_ERROR(Io->Mem.Read(Io,EfiPciIoWidthUint32,0,0,1,&Cap)) || Cap==0xffffffffU ||
+        EFI_ERROR(Io->Mem.Read(Io,EfiPciIoWidthUint32,0,4,1,&Params))) continue;
+    for (UINT32 P=0; P<(Params>>24) && P<32; P++) {
+      UINT32 Reg=(Cap&0xffU)+0x400U+0x10U*P, V=0, Li=0;
+      if (EFI_ERROR(Io->Mem.Read(Io,EfiPciIoWidthUint32,0,Reg,1,&V))) continue;
+      Io->Mem.Read(Io,EfiPciIoWidthUint32,0,Reg+8,1,&Li);
+      if (!(V&1U)) continue;   /* nothing connected */
+      DEBUG((DEBUG_ERROR,"PS5 USB port (%a): xhci %u port %u PORTSC=%x speed=%u link=%u enabled=%u link-errors=%u\n",
+        When,Id,P+1,V,(V>>10)&0xFU,(V>>5)&0xFU,(V>>1)&1U,Li&0xFFFFU));
+    }
+  }
+  FreePool(Pci);
+}
 STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
 {
   EFI_HANDLE *Pci=NULL; UINTN N=0; UINT32 Hc=0;
   /* r5.25.11 (boot timing: 2 x 2 s of the 6.3 s before bootmgr were two sequential power-off pauses): the ports of every
    * controller are switched off first, then ONE pause of 2 s, then every controller is restarted */
   EFI_HANDLE CyH[8]; UINT32 CyId[8],CyCap[8],CyPar[8],CyOff[8]; UINTN Cy=0;
+  /* r5.25.14 (HW 23.11., user: a direct restart into a Windows on a USB SSD ended in INACCESSIBLE_BOOT_DEVICE, Windows Setup
+   * from the stick saw no disk after a direct restart; a start from GameOS worked): after a restart from Windows a USB disk
+   * is NOT known good - the USB-NVMe bridge keeps the state the previous Windows left (UEFI can still read it, the next
+   * Windows cannot). A warm run power-cycles every USB disk, the chosen boot disk included; the boot path then waits up to
+   * 60 s for it (a USB stick is back in seconds, an RTL9210B bridge needs 40-50 s). */
+  /* r5.25.17: r5.25.14 also cut the boot disk after a restart from Windows - it did not help (HW 23.11.: still
+   * INACCESSIBLE_BOOT_DEVICE) and the bridge came back in an error state; the boot disk and working disks stay powered */
+  BOOLEAN WarmAll=FALSE;
   EFI_DEVICE_PATH_PROTOCOL *KeepDp=Keep?DevicePathFromHandle(Keep):NULL;
   if (EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiPciIoProtocolGuid,NULL,&N,&Pci))) return;
   for (UINTN I=0; I<N; I++) {
@@ -428,7 +463,7 @@ STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
     if (PowerCycle && !(Hcc&BIT3)) {
       DEBUG((DEBUG_ERROR,"PS5 xHCI %u: no port power control - power cycle skipped\n",Id)); continue;
     }
-    UINT32 KeepPort=0, KeepMask=0, ZeroMask=0, ZeroCut=0;   /* 1-based port / bit (port-1); r5.25.3: working USB disks kept, 0-byte disks cycled */
+    UINT32 KeepPort=0, KeepMask=0, ZeroMask=0, ZeroCut=0, CardMask=0;   /* 1-based port / bit (port-1); r5.25.3: working USB disks kept, 0-byte disks cycled */
     { EFI_DEVICE_PATH_PROTOCOL *HcDp=DevicePathFromHandle(Pci[I]);
       UINTN HcLen=HcDp?GetDevicePathSize(HcDp)-END_DEVICE_PATH_LENGTH:0;
       KeepPort=Ps5RootPortOf(KeepDp,HcDp,HcLen);
@@ -448,21 +483,52 @@ STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
               CHAR8 Mdl[64];
               Ps5DiskModel(Bh[K],Mdl,sizeof(Mdl));
               if (AsciiStrStr(Mdl,"SD")||AsciiStrStr(Mdl,"MMC")||AsciiStrStr(Mdl,"Card")||AsciiStrStr(Mdl,"Reader")||AsciiStrStr(Mdl,"CF")) {
+                CardMask|=1U<<(Pt-1);
                 DEBUG((DEBUG_ERROR,"PS5 xHCI %u: port %u empty card reader '%a' - not a reason to cycle\n",Id,Pt,Mdl)); continue;
               }
               ZeroMask|=1U<<(Pt-1);
               DEBUG((DEBUG_ERROR,"PS5 xHCI %u: port %u has a USB disk with 0 bytes - will be cycled\n",Id,Pt));
               continue;
             }
-            if (Pt && Pt<=32 && !(KeepMask&(1U<<(Pt-1)))) {
+            if (!WarmAll && Pt && Pt<=32 && !(KeepMask&(1U<<(Pt-1)))) {
               KeepMask|=1U<<(Pt-1);
               DEBUG((DEBUG_ERROR,"PS5 xHCI %u: port %u carries a working USB disk (%Lu blocks) - stays powered\n",Id,Pt,Bk->Media->LastBlock+1));
             }
           }
           FreePool(Bh);
         }
+        /* r5.25.19 (HW 23.11. r19b: after a start from GameOS the RTL9210B with the installed Windows sat on a connected and
+         * enabled port - INQUIRY answered, no disk: READ CAPACITY timed out, see v380 - so it was neither a working nor a
+         * 0-byte disk and its port was left alone; the firmware booted the installer stick): a USB mass-storage interface
+         * without a working disk on its root port is a stuck bridge and is cycled like a 0-byte disk (card readers excepted). */
+        EFI_HANDLE *Uh=NULL; UINTN Un=0;
+        if (!EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiUsbIoProtocolGuid,NULL,&Un,&Uh))) {
+          for (UINTN K=0; K<Un; K++) {
+            EFI_USB_IO_PROTOCOL *U=NULL; EFI_USB_INTERFACE_DESCRIPTOR D; UINT32 Pt;
+            if (EFI_ERROR(gBS->HandleProtocol(Uh[K],&gEfiUsbIoProtocolGuid,(VOID **)&U)) || U==NULL ||
+                EFI_ERROR(U->UsbGetInterfaceDescriptor(U,&D)) || D.InterfaceClass!=8) continue;
+            Pt=Ps5RootPortOf(DevicePathFromHandle(Uh[K]),HcDp,HcLen);
+            if (!Pt || Pt>32 || ((KeepMask|CardMask|ZeroMask)&(1U<<(Pt-1)))) continue;
+            ZeroMask|=1U<<(Pt-1);
+            DEBUG((DEBUG_ERROR,"PS5 xHCI %u: port %u has USB storage without a disk (bridge not ready) - will be cycled\n",Id,Pt));
+          }
+          FreePool(Uh);
+        }
       } }
     if (PowerCycle && KeepPort) DEBUG((DEBUG_ERROR,"PS5 xHCI %u: port %u carries the chosen boot medium - stays powered\n",Id,KeepPort));
+    /* r5.25.17 (HW 23.11. r15test/diag: a controller restart disturbed the RTL9210B kept on the same controller - BOT
+     * timeouts, transaction errors, INACCESSIBLE_BOOT_DEVICE in the Windows on it; restoring only the port power without the
+     * restart (r5.25.16) left stale devices in the USB stack and made every USB access slow): a controller that carries the
+     * boot medium or a working USB disk is not touched at all, unless one of its disks is stuck at 0 bytes.
+     * r5.25.19 (HW 23.11. install18: a start from GameOS did not see the RTL9210B with the Windows of the new install, the
+     * installer stick on the same controller was "working", so the controller was left alone and the bridge - INQUIRY ok,
+     * READ CAPACITY timeout, off the bus, see v380 - was never power-cycled; the firmware booted the stick again): only
+     * after a restart from Windows. A start from GameOS cycles the other ports and restarts the controller as before. */
+    if (PowerCycle && !mPs5ForceCycle && *(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL==0x31474F4C4D524157ULL &&
+        (KeepMask|(KeepPort&&KeepPort<=32?(1U<<(KeepPort-1)):0)) && !ZeroMask) {
+      DEBUG((DEBUG_ERROR,"PS5 xHCI %u: carries a working USB disk - controller and its ports left alone\n",Id));
+      PS5_RECOVER_PRINT(L"[xhci%u: left alone]\r\n",Id); continue;
+    }
     PS5_RECOVER_PRINT(L"[xhci%u:",Id);
     for (UINT32 P=0; P<(Params>>24) && P<32; P++) {
       UINT32 Reg=(Cap&0xffU)+0x400U+0x10U*P, V=0;
@@ -474,9 +540,9 @@ STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
       /* r5.25.11 (HW 23.11. lab126/127): after a restart from Windows a connected device is NOT known good - Windows
        * suspended it at shutdown, and a self-powered USB-C hub (keyboard, mouse) then failed every port reset in Windows.
        * A warm run cycles such ports like a cold boot; the boot medium and working USB disks above stay powered. */
-      if ((V&3U)==3U && !(ZeroMask&(1U<<P)) && *(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL!=0x31474F4C4D524157ULL) {   /* r5.25.3: connected + enabled, no 0-byte disk: a working device, left alone */
-        DEBUG((DEBUG_ERROR,"PS5 xHCI %u port %u: device connected and enabled - stays powered\n",Id,P+1)); continue;
-      }
+      /* r5.25.19 (HW 23.11. r19b/r19e): the r5.25.3 rule "connected + enabled = a working device, left alone" kept the stuck
+       * RTL9210B (PORTSC A1603: on the bus, INQUIRY only, no disk) powered, and the controller restart then never returned.
+       * A start from GameOS now cycles every port without a working disk, like a restart from Windows already did. */
       V=(V&PS5_XHCI_PORT_NEUTRAL)&~PS5_XHCI_PORT_POWER;
       if (!EFI_ERROR(Io->Mem.Write(Io,EfiPciIoWidthUint32,0,Reg,1,&V))) { Off++; if (ZeroMask&(1U<<P)) ZeroCut++; }
     }
@@ -487,12 +553,14 @@ STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
     if (Cy<8) { CyH[Cy]=Pci[I]; CyId[Cy]=Id; CyCap[Cy]=Cap; CyPar[Cy]=Params; CyOff[Cy]=Off; Cy++; }
   }
   // The driver still owns the running controller. Its next start resets the controller, which powers the ports again.
-  if (Cy) gBS->Stall(2000000);   /* 2 s as before (HW 23.11. lab133: with 1 s the mouse behind the USB-C hub failed once in 3 restarts) */
+  /* r5.25.19: a log snapshot around every step, so a start that stops in the power cycle leaves its log (HW 23.11.) */
+  if (Cy) { DEBUG((DEBUG_ERROR,"PS5 usbpowercycle: %u controllers, ports off - 2 s pause\n",(UINT32)Cy)); ConsoleSnapshot(); gBS->Stall(2000000); }   /* 2 s as before (HW 23.11. lab133: with 1 s the mouse behind the USB-C hub failed once in 3 restarts) */
   for (UINTN K=0; K<Cy; K++) {
     EFI_PCI_IO_PROTOCOL *Io=NULL;
     EFI_STATUS Stop=gBS->DisconnectController(CyH[K],NULL,NULL);
+    DEBUG((DEBUG_ERROR,"PS5 xHCI %u power cycle: stopped %r\n",CyId[K],Stop)); ConsoleSnapshot();
     EFI_STATUS Start=gBS->ConnectController(CyH[K],NULL,NULL,TRUE);
-    DEBUG((DEBUG_ERROR,"PS5 xHCI %u power cycle: ports-off=%u stop=%r start=%r\n",CyId[K],CyOff[K],Stop,Start));
+    DEBUG((DEBUG_ERROR,"PS5 xHCI %u power cycle: ports-off=%u stop=%r start=%r\n",CyId[K],CyOff[K],Stop,Start)); ConsoleSnapshot();
     if (!EFI_ERROR(gBS->HandleProtocol(CyH[K],&gEfiPciIoProtocolGuid,(VOID **)&Io)))
       for (UINT32 P=0; P<(CyPar[K]>>24) && P<32; P++) {   /* r5.25: PORTSC after the restart */
         UINT32 V=0;
@@ -1844,7 +1912,15 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
     if (CycleDone && !CycleBack && CycleWantId!=0) {
       BOOLEAN Back=FALSE;
       for (UINTN V=0; V<VolN; V++) if (Ps5DiskId(Ps5DiskOf(VolH[V]))==CycleWantId) Back=TRUE;
+      /* r5.25.19: a stuck bridge (RTL9210B ~40-50 s) was cut too - wait for it as well, then choose again (an installed
+       * Windows on it goes before the installer stick that was chosen without it) */
+      if (Back && mPs5CycleTsc!=0 && Ps5UsbWorkingDisks()<mPs5CycleWant && Attempt<CycleAt+600) {
+        if ((Attempt-CycleAt)%50==0) { DEBUG((DEBUG_ERROR,"PS5 usbpowercycle: waiting for the cycled USB bridge (%u of %u disks): %u s\n",
+          (UINT32)Ps5UsbWorkingDisks(),(UINT32)mPs5CycleWant,(UINT32)((Attempt-CycleAt)/10))); if (Attempt>CycleAt) EfiBootManagerConnectAll(); }
+        Back=FALSE;
+      }
       if (Back || Attempt>=CycleAt+600) {
+        if (mPs5CycleTsc!=0) { DEBUG((DEBUG_ERROR,"PS5 usbpowercycle: USB disks after the cycle: %u of %u\n",(UINT32)Ps5UsbWorkingDisks(),(UINT32)mPs5CycleWant)); mPs5CycleTsc=0; }
         CycleBack=TRUE;
         DEBUG((DEBUG_ERROR,"PS5 usbpowercycle: chosen disk %08x %a after %u.%u s\n",CycleWantId,Back?"back":"not back, giving up",
           (UINT32)((Attempt-CycleAt)/10),(UINT32)((Attempt-CycleAt)%10)));
@@ -1888,7 +1964,24 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
     if (mPs5WarmDirect) {
       EFI_HANDLE T=NULL;
       for (UINTN V=0; V<VolN && T==NULL; V++) if (Ps5VolGptGuidIs(VolH[V],&mPs5WarmGuid)) T=VolH[V];
-      if (T!=NULL) {
+      /* r5.25.22 (HW 24.11. autoinst3: the restart at the end of Windows Setup from a USB stick came back with no BootNext and
+       * no Windows entry in BootOrder, so the last boot device - the installer stick - was started again and Windows Setup began
+       * anew): a restart from a medium without an installed Windows (no \EFI\Microsoft\Boot\BCD) goes to an installed Windows
+       * on USB if there is one, like a start from GameOS; up to 5 s for the USB SSD's ESP to appear. */
+      BOOLEAN WarmWaitInstalled=FALSE;
+      if (T!=NULL && !Ps5VolumeHasFile(T,L"\\EFI\\Microsoft\\Boot\\BCD")) {
+        if (UsbInstalled!=NULL && UsbInstalled!=T) {
+          if (!mPs5WarmNotified) DEBUG((DEBUG_ERROR,"PS5 warm re-entry: the last boot device has no installed Windows - booting the installed Windows on USB instead\n"));
+          T=UsbInstalled;
+        } else if (Attempt<50) {
+          WarmWaitInstalled=TRUE;
+          if (Attempt%10==0) DEBUG((DEBUG_ERROR,"PS5 warm re-entry: last boot device without an installed Windows - looking for one (%u s)\n",(UINT32)(Attempt/10)));
+          if (Attempt%20==10) EfiBootManagerConnectAll();
+        }
+      }
+      if (WarmWaitInstalled) {
+        Selected=NULL;
+      } else if (T!=NULL) {
         Selected=T; ListDecided=TRUE; mPs5WarmDirectHit=TRUE;
         if (!mPs5WarmNotified) { mPs5WarmNotified=TRUE; DEBUG((DEBUG_ERROR,"PS5 warm re-entry: target found - booting it directly\n")); }
       } else {
@@ -1897,9 +1990,13 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
         UINTN Limit=mPs5WarmUsb?PS5_WARM_USB_WAIT_ATTEMPTS:PS5_BOOTLIST_WAIT_ATTEMPTS;
 #ifdef PS5_NATIVE_SETUP
         if (CycleDone && CycleAt+PS5_WARM_USB_WAIT_ATTEMPTS>Limit) Limit=CycleAt+PS5_WARM_USB_WAIT_ATTEMPTS;
-        if (mPs5WarmUsb && Attempt==50 && mPs5CycleTsc==0) {   /* target still missing after 5 s: a bridge stuck at 0 bytes? */
-          mPs5CycleOnlyZero=TRUE; mRecoverSilent=TRUE; Ps5UsbRecover(TRUE,NULL); mRecoverSilent=FALSE; mPs5CycleOnlyZero=FALSE;
-          if (mPs5CycleTsc!=0) DEBUG((DEBUG_ERROR,"PS5 warm re-entry: USB target missing after 5 s - power-cycled a stuck USB bridge\n"));
+        /* r5.25.23 (HW 24.11. warmloop restart 3: the RTL9210B came back from Windows at 480 Mbit/s without a disk, its controller
+         * also carried the setup stick and was "left alone"): after 5 s every port without a working disk is power-cycled, the
+         * controller restarted even if it carries a working disk (the boot medium is gone anyway) */
+        if (mPs5WarmUsb && Attempt==50) {
+          DEBUG((DEBUG_ERROR,"PS5 warm re-entry: USB target missing after 5 s - power cycle of the USB ports without a working disk\n"));
+          mPs5ForceCycle=TRUE; mRecoverSilent=TRUE; Ps5UsbRecover(TRUE,NULL); mRecoverSilent=FALSE; mPs5ForceCycle=FALSE;
+          ConsoleSnapshot();
         }
 #endif
         if (Attempt<Limit) {
@@ -1939,6 +2036,7 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
       DEBUG((DEBUG_ERROR,"PS5 usbpowercycle: port power cycle of the xHCI root ports before booting (chosen disk %08x, pass %u)\n",
         CycleWantId,(UINT32)Attempt));
       Ps5LogUsbDisks("before the cycle");
+      Ps5LogUsbPorts("before the cycle");
       if (mPs5UsbMassStopHandle!=NULL && !EFI_ERROR(gBS->UninstallProtocolInterface(mPs5UsbMassStopHandle,&mPs5UsbMassStopGuid,NULL))) {
         mPs5UsbMassStopHandle=NULL;   /* r5.25.2: never a USB-MSD stop marker across the controller restart */
         DEBUG((DEBUG_ERROR,"PS5 USB-MSD: stop marker removed before usbpowercycle\n"));
@@ -2073,7 +2171,7 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
     }
     if (CycleHold) continue;   /* r5.25.2: waiting after usbpowercycle - no second power cycle, no "no medium" lines */
     UINTN Late=Attempt+1-PS5_BOOT_MEDIUM_QUIET_ATTEMPTS;       /* passes since the display came up */
-    if (!NoMediumMenuEntered && Late==100) {   /* r5.25.10: open the graphical UEFI menu even without any bootable medium */
+    if (!NoMediumMenuEntered && Late==100 && !(mPs5WarmDirect && mPs5WarmUsb)) {   /* r5.25.10: open the graphical UEFI menu even without any bootable medium; r5.25.23: not while a restart waits for its USB disk */
       NoMediumMenuEntered=TRUE;
       DEBUG((DEBUG_ERROR,"PS5 Windows boot: no bootx64.efi medium after 13 s - opening UEFI Boot Manager\n"));
       EfiBootManagerRefreshAllBootOption();

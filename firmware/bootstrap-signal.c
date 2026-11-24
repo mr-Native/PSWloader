@@ -7,8 +7,12 @@
 #include "icc-power.h"
 #include "pci-transport.h"
 #define ECAM 0xf0000000ULL
-#define MAILBOX 0x85400000ULL
-#define DOORBELL 0x85308000ULL
+/* r5.25.15 (GitHub issue 4, GameOS 6.00; user: "like ps5-linux"): the ICC mailbox and doorbell come from the BARs of
+ * the Salina function 104D:9107 (BAR4 = mailbox, BAR2 + 0x108000 = doorbell), as PS5 Linux maps them; 13.60 gives
+ * 0x85400000 / 0x85308000. The values below are only the fallback until available() has read the BARs. */
+static uint64_t mailbox=0x85400000ULL,doorbell=0x85308000ULL;
+#define MAILBOX mailbox
+#define DOORBELL doorbell
 #define TSC_HZ 1596300000ULL
 #ifndef PS5_SIGNAL_TEST
 static uint32_t raw_read(uint64_t a,unsigned w) {
@@ -63,11 +67,13 @@ static int available(void) {
         }
         if(count==48)return 0;
     }
-    uint32_t v;
-    const unsigned offsets[]={0,0x18,0x1c,0x20,0x24};
-    const uint32_t expected[]={0x9107104d,0x8520000c,0,0x8540000c,0};
-    for(unsigned i=0;i<5;i++)
-        if(config(0x04005000+offsets[i],4,&v) || v!=expected[i])return 0;
+    uint32_t v,b2l,b2h,b4l,b4h;
+    if(config(0x04005000,4,&v) || v!=0x9107104d)return 0;
+    if(config(0x04005018,4,&b2l) || config(0x0400501c,4,&b2h) || config(0x04005020,4,&b4l) || config(0x04005024,4,&b4h))return 0;
+    uint64_t b2=((uint64_t)b2h<<32)|(b2l&~0xfu),b4=((uint64_t)b4h<<32)|(b4l&~0xfu);
+    /* only inside the 32-bit MMIO window the bootstrap maps uncached (0x8000_0000..0xFFFF_FFFF) */
+    if(b2<0x80000000ULL || b4<0x80000000ULL || b2+0x110000>0x100000000ULL || b4+0x1000>0x100000000ULL)return 0;
+    mailbox=b4;doorbell=b2+0x108000;
     return !config(0x04005004,2,&v) && (v&2);
 }
 static uint32_t icc_read(void *c,unsigned region,unsigned offset,unsigned width) {

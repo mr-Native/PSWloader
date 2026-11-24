@@ -41,8 +41,10 @@
 #include "ps5-warm-probe.h"
 #endif
 #endif
-#define MAILBOX 0x85400000U
-#define DOORBELL 0x85308000U
+/* r5.25.15: ICC mailbox/doorbell from the Salina BARs (BAR4, BAR2 + 0x108000) like PS5 Linux, not the 13.60 values */
+STATIC UINTN mIccMailbox=0x85400000U,mIccDoorbell=0x85308000U;
+#define MAILBOX mIccMailbox
+#define DOORBELL mIccDoorbell
 #define TSC_HZ 1596300000ULL
 STATIC struct ps5_edid_state mEdid;
 STATIC uint32_t ReadIcc(void *Context,unsigned Region,unsigned Offset,unsigned Width) {
@@ -418,10 +420,11 @@ STATIC VOID Ps5ButtonInputStart(VOID) {
   mButtonInEx.RegisterKeyNotify=ButtonRegisterNotify;mButtonInEx.UnregisterKeyNotify=ButtonUnregisterNotify;
   if(EFI_ERROR(gBS->CreateEvent(EVT_NOTIFY_WAIT,TPL_NOTIFY,ButtonWait,NULL,&mButtonInEx.WaitForKeyEx)))return;
   if(EFI_ERROR(gBS->CreateEvent(EVT_TIMER|EVT_NOTIFY_SIGNAL,TPL_CALLBACK,ButtonPoll,NULL,&mButtonTimer)))return;
-#ifdef PS5_WARM_NO_BUTTON_POLL
-  if(!mPs5Warm)   /* lab: no ICC button poller after a warm re-entry (does the BDS hang go away?) */
-#endif
-  gBS->SetTimer(mButtonTimer,TimerPeriodic,500000);
+  /* r5.25.18 (HW 23.11. diag14): after a warm re-entry from a Windows without ps5pwr (WinPE, Windows Setup from a USB
+   * stick) the periodic poller hung the DXE dispatch before any picture. After a warm re-entry the button is polled only
+   * when a console reads keys (ButtonRead), which is enough for the start screen and the boot menu. */
+  if(!mPs5Warm)
+    gBS->SetTimer(mButtonTimer,TimerPeriodic,500000);
   { STATIC EFI_GUID EbsGroup={0x27abf055,0xb1b8,0x4c26,{0x80,0x48,0x74,0x8f,0x37,0xba,0xa2,0xdf}};   /* gEfiEventExitBootServicesGuid */
     EFI_EVENT Ebs=NULL;
     EFI_STATUS Es=gBS->CreateEventEx(EVT_NOTIFY_SIGNAL,TPL_CALLBACK,ButtonExitBootServices,NULL,&EbsGroup,&Ebs);
@@ -733,12 +736,15 @@ STATIC VOID Ps5EdidPhaseFromVideo(UINTN Stage) {
 #endif
 EFI_STATUS EFIAPI Ps5HdmiProbeEntry(EFI_HANDLE ImageHandle,EFI_SYSTEM_TABLE *SystemTable) {
   UINTN Device=0x04005000;
-  if(PciExpressRead32(Device)!=0x9107104D || !(PciExpressRead16(Device+4)&BIT1) ||
-     PciExpressRead32(Device+0x18)!=0x8520000C || PciExpressRead32(Device+0x1C)!=0 ||
-     PciExpressRead32(Device+0x20)!=0x8540000C || PciExpressRead32(Device+0x24)!=0) {
-    DEBUG((DEBUG_INFO,"PS5 HDMI probe: skipped (SPCIE identity/BAR mismatch)\n"));
+  UINT64 Bar2=((UINT64)PciExpressRead32(Device+0x1C)<<32)|(PciExpressRead32(Device+0x18)&~0xFU);
+  UINT64 Bar4=((UINT64)PciExpressRead32(Device+0x24)<<32)|(PciExpressRead32(Device+0x20)&~0xFU);
+  if(PciExpressRead32(Device)!=0x9107104D || !(PciExpressRead16(Device+4)&BIT1) || Bar2==0 || Bar4==0 ||
+     Bar2>=0x100000000ULL || Bar4>=0x100000000ULL) {
+    DEBUG((DEBUG_ERROR,"PS5 HDMI probe: skipped (SPCIE identity/BAR: %lx %lx)\n",Bar2,Bar4));
     return EFI_UNSUPPORTED;
   }
+  mIccMailbox=(UINTN)Bar4;mIccDoorbell=(UINTN)Bar2+0x108000;
+  DEBUG((DEBUG_ERROR,"PS5 ICC: mailbox %lx doorbell %lx (Salina BAR4/BAR2)\n",(UINT64)mIccMailbox,(UINT64)mIccDoorbell));
   if(!UncachedMmio(MAILBOX) || !UncachedMmio(DOORBELL)) {
     DEBUG((DEBUG_ERROR,"PS5 HDMI probe: skipped (MMIO not UC)\n"));
     return EFI_NOT_READY;

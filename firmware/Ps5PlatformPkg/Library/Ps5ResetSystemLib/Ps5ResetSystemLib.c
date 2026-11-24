@@ -63,12 +63,13 @@ STATIC VOID EFIAPI ConvertRuntimePointers (EFI_EVENT Event, VOID *Context) {
 RETURN_STATUS EFIAPI Ps5ResetConstructor (EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   mPrivateRt = gRT; // Isolate this callback from other libraries converting gRT.
   UINTN Device = 0x04005000;
+  /* r5.25.15: mailbox/doorbell from the Salina BARs (BAR4, BAR2 + 0x108000) like PS5 Linux - not only the 13.60 values */
+  UINT64 Bar2 = ((UINT64)PciExpressRead32 (Device + 0x1C) << 32) | (PciExpressRead32 (Device + 0x18) & ~0xFU);
+  UINT64 Bar4 = ((UINT64)PciExpressRead32 (Device + 0x24) << 32) | (PciExpressRead32 (Device + 0x20) & ~0xFU);
   mAvailable = PciExpressRead32 (Device) == 0x9107104D &&
       (PciExpressRead16 (Device + 4) & BIT1) != 0 &&
-      (PciExpressRead32 (Device + 0x18) & ~0xFU) == 0x85200000 &&
-      PciExpressRead32 (Device + 0x1C) == 0 &&
-      (PciExpressRead32 (Device + 0x20) & ~0xFU) == 0x85400000 &&
-      PciExpressRead32 (Device + 0x24) == 0;
+      Bar2 != 0 && Bar4 != 0 && Bar2 < 0x100000000ULL && Bar4 < 0x100000000ULL;
+  if (mAvailable) { mMailbox = (UINTN)Bar4; mDoorbell = (UINTN)Bar2 + 0x108000; }
   // Installing the architectural protocol does not prove the device is usable.
   // In TCG this guard is false; any Reset call then stops without MMIO writes.
   DEBUG ((DEBUG_INFO, "PS5 ICC ResetSystem device verified: %d\n", mAvailable));
@@ -599,7 +600,7 @@ STATIC VOID WarmPrepare (VOID) {
   P->AcpiSrc = (UINT64)(UINTN)Save + EFI_PAGES_TO_SIZE (EFI_SIZE_TO_PAGES (HobLen)); P->AcpiDst = PS5W_ACPI_BASE; P->AcpiLen = AcpiLen;
   P->Gdt[0] = 0; P->Gdt[1] = 0x00AF9A000000FFFFULL; P->Gdt[2] = 0x00CF92000000FFFFULL;   /* 64-bit code 0x08, data 0x10 */
   P->GdtLimit = sizeof (P->Gdt) - 1; P->GdtBase = Tramp + ParOff + OFFSET_OF (PS5_WARM_PARAMS, Gdt);
-  P->ProbeFn = (UINT64)(UINTN)WarmIccOff; P->ProbeMbox = 0x85400000; P->ProbeBell = 0x85308000;   /* physical: before SetVirtualAddressMap */
+  P->ProbeFn = (UINT64)(UINTN)WarmIccOff; P->ProbeMbox = mMailbox; P->ProbeBell = mDoorbell;   /* physical: before SetVirtualAddressMap */
   mWarmPhys = Tramp; mWarmVa = Tramp; mWarmParams = P; mWarmParOff = ParOff;
   mWarmReady = TRUE;
 #ifdef PS5_WARM_RESCUE

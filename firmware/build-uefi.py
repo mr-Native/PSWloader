@@ -127,14 +127,13 @@ def prepare_boot_menu_storage_only(root):
 
 
 def prepare_usb_mass_boot(root):
-    """Force FIXED media for PS5 NVMe-over-USB so standard Windows 11 installs boot."""
+    """Force FIXED media for PS5 NVMe-over-USB so standard Windows 11 installs boot.
+    r5.25.20: + START UNIT for a unit that reports NOT READY, + sense / failed command lines in the log."""
     path = root / 'MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassBoot.c'
     if not path.exists():
         return
-    text = path.read_text()
-    marker = 'forcing FIXED for Windows boot'
-    if marker in text:
-        return
+    # always from the EDK2 git state: the patches below are applied exactly once per build
+    text = subprocess.check_output(['git', 'show', 'HEAD:MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassBoot.c'], cwd=root, text=True).replace('\r\n', '\n')
     anchor = 'Media->RemovableMedia = (BOOLEAN)(USB_BOOT_REMOVABLE (UsbMass->InquiryData.Removable));'
     patch = (
         'Media->RemovableMedia = (BOOLEAN)(USB_BOOT_REMOVABLE (UsbMass->InquiryData.Removable));\n'
@@ -147,8 +146,74 @@ def prepare_usb_mass_boot(root):
         '  DEBUG ((DEBUG_ERROR, "PS5 USB-MSD: INQUIRY removable=%u -> forcing FIXED for Windows boot\\n", (UINT32)Media->RemovableMedia));\n'
         '  Media->RemovableMedia = FALSE;'
     )
-    if anchor in text:
-        path.write_text(text.replace(anchor, patch))
+    if text.count(anchor) != 1: raise RuntimeError('Unexpected UsbMassBoot.c removable anchor')
+    text = text.replace(anchor, patch)
+    # r5.25.20 (HW 23./24.11.: a USB SSD behind a bridge - RTL9210B - gave no disk after a start from GameOS or a restart
+    # from Windows, and the boot path waited up to 60 s per command while the unit said "not ready"): an operating system
+    # sends START STOP UNIT (start) to a unit that reports NOT READY; EDK2 only waits. At most 2 tries per device. The sense
+    # data and failed commands of the first 24 errors go to the log (empty card readers excepted).
+    helper = '''#include "UsbMass.h"
+
+STATIC USB_MASS_DEVICE  *mPs5MsdStartDev;
+STATIC UINTN            mPs5MsdStartTries;
+STATIC UINTN            mPs5MsdLogged;
+
+STATIC
+VOID
+Ps5UsbMsdStartUnit (
+  IN USB_MASS_DEVICE  *UsbMass,
+  IN UINT8            Ascq
+  )
+{
+  UINT8       Cmd[12];
+  UINT32      CmdResult;
+  EFI_STATUS  Status;
+
+  if (mPs5MsdStartDev != UsbMass) {
+    mPs5MsdStartDev   = UsbMass;
+    mPs5MsdStartTries = 0;
+  }
+
+  if (mPs5MsdStartTries >= 2) {
+    return;
+  }
+
+  mPs5MsdStartTries++;
+  ZeroMem (Cmd, sizeof (Cmd));
+  Cmd[0]    = 0x1B;                                // START STOP UNIT
+  Cmd[1]    = (UINT8)(USB_BOOT_LUN (UsbMass->Lun));
+  Cmd[4]    = 0x01;                                // START
+  CmdResult = 0;
+  Status    = UsbMass->Transport->ExecCommand (UsbMass->Context, Cmd, sizeof (Cmd), EfiUsbNoData, NULL, 0, UsbMass->Lun, 10 * USB_MASS_1_SECOND, &CmdResult);
+  DEBUG ((DEBUG_ERROR, "PS5 USB-MSD: unit not ready (ASCQ %02x) - START UNIT try %u: %r, result %x\\n", (UINT32)Ascq, (UINT32)mPs5MsdStartTries, Status, CmdResult));
+}
+'''
+    inc = '#include "UsbMass.h"\n'
+    if text.count(inc) != 1: raise RuntimeError('Unexpected UsbMassBoot.c include anchor')
+    text = text.replace(inc, helper, 1)
+    sw = '  switch (USB_BOOT_SENSE_KEY (SenseData.SenseKey)) {\n'
+    if text.count(sw) != 1: raise RuntimeError('Unexpected UsbMassBoot.c sense switch anchor')
+    text = text.replace(sw,
+        '  if ((USB_BOOT_SENSE_KEY (SenseData.SenseKey) != USB_BOOT_SENSE_NO_SENSE) && (SenseData.Asc != USB_BOOT_ASC_NO_MEDIA) && (mPs5MsdLogged < 24)) {\n'
+        '    mPs5MsdLogged++;\n'
+        '    DEBUG ((DEBUG_ERROR, "PS5 USB-MSD: sense key %x asc %02x ascq %02x (lun %u)\\n", (UINT32)USB_BOOT_SENSE_KEY (SenseData.SenseKey), (UINT32)SenseData.Asc, (UINT32)SenseData.Ascq, (UINT32)UsbMass->Lun));\n'
+        '  }\n\n' + sw, 1)
+    nr = ('    case USB_BOOT_SENSE_NOT_READY:\n'
+          '      Status = EFI_DEVICE_ERROR;\n'
+          '      if (SenseData.Asc == USB_BOOT_ASC_NO_MEDIA) {\n'
+          '        Media->MediaPresent = FALSE;\n'
+          '        Status              = EFI_NO_MEDIA;\n'
+          '      } else if (SenseData.Asc == USB_BOOT_ASC_NOT_READY) {\n'
+          '        Status = EFI_NOT_READY;\n')
+    if text.count(nr) != 1: raise RuntimeError('Unexpected UsbMassBoot.c NOT READY anchor')
+    text = text.replace(nr, nr + '        Ps5UsbMsdStartUnit (UsbMass, SenseData.Ascq);\n', 1)
+    fail = '  DEBUG ((DEBUG_INFO, "UsbBootExecCmd: %r to Exec 0x%x Cmd (Result = %x)\\n", Status, *(UINT8 *)Cmd, CmdResult));\n'
+    if text.count(fail) != 1: raise RuntimeError('Unexpected UsbMassBoot.c failed command anchor')
+    text = text.replace(fail, fail +
+        '  if (mPs5MsdLogged < 24) {\n'
+        '    DEBUG ((DEBUG_ERROR, "PS5 USB-MSD: command %02x failed: %r, result %x (lun %u)\\n", (UINT32)*(UINT8 *)Cmd, Status, CmdResult, (UINT32)UsbMass->Lun));\n'
+        '  }\n\n', 1)
+    path.write_text(text)
 
 
 def replace_rtc(source):
@@ -539,7 +604,6 @@ def main():
     parser.add_argument('--setup-seconds', type=int, default=None, help='Esc/boot-manager window before the UEFI boot continues (5 s ticks; default 30)')
     parser.add_argument('--lab-sandisk', action='store_true', help='lab: boot the internal SanDisk and switch its BCD default to its own Windows once')
     parser.add_argument('--lab-debug-info', action='store_true', help='lab: keep DEBUG_INFO in the log ring')
-    parser.add_argument('--warm-no-button-poll', action='store_true', help='lab: no ICC button poller timer after a warm re-entry')
     parser.add_argument('--assert-breakpoint', action='store_true', help='lab: PcdDebugPropertyMask 0x1F (ASSERT -> int3) instead of 0x2F (dead loop)')
     parser.add_argument('--warm-timer-storm', action='store_true', help='lab: 200 local-APIC timer interrupts within 0.5 s after a warm re-entry switch off')
     parser.add_argument('--warm-keep-gpu', action='store_true', help='lab: the warm trampoline leaves vendor 1002 functions (GPU, HDMI audio) as the OS left them')
@@ -899,9 +963,6 @@ STATIC VOID Ps5ProbeOffNow (VOID) { *(volatile UINT64 *)(UINTN)0x111806040ULL = 
     if args.warm_probe:
         rl = package / 'Library/Ps5ResetSystemLib/Ps5ResetSystemLib.c'
         rl.write_text('#define PS5_WARM_PROBE %d\n' % args.warm_probe + rl.read_text())
-    if args.warm_no_button_poll:
-        hp = package / 'HdmiProbeDxe/HdmiProbeDxe.c'
-        hp.write_text('#define PS5_WARM_NO_BUTTON_POLL 1\n' + hp.read_text())
     if args.warm_probe in (53, 55, 56):   # lab: ButtonPoll (HdmiProbeDxe) slower than 0.5 s / entered / returned after a warm re-entry
         hp = package / 'HdmiProbeDxe/HdmiProbeDxe.c'
         hp.write_text('#define PS5_WARM_PROBE %d\n' % args.warm_probe + hp.read_text())

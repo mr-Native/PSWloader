@@ -24,3 +24,10 @@ PSWloader does not bundle any proprietary Sony or NXP firmware binaries. Instead
 ## Test-signing & anti-cheat
 
 Because the PS5 drivers are self-signed rather than WHQL-signed by Microsoft, Windows runs with `testsigning` enabled. Kernel-level anti-cheat systems that reject test-signing mode will refuse to launch games.
+
+Secure Boot and TPM 2.0 are not available:
+
+- **Secure Boot** would need every boot driver signed by Microsoft (or keys the user enrolls) - test-signed drivers and Secure Boot exclude each other, so it stays off.
+- **TPM 2.0:** the PS5 has no TPM that Windows can use, and the firmware does not emulate one. Windows 11 is installed with the TPM check skipped.
+
+Games that require Secure Boot or TPM 2.0 (for example some titles with Vanguard, FACEIT or similar anti-cheat, or Steam games that show "Secure Boot & TPM 2.0 Not Detected") do not run.

@@ -104,7 +104,7 @@
  }
  
  void trim_newline(char *s) {
-@@ -118,59 +96,146 @@
+@@ -118,59 +96,170 @@
    }
  }
  
@@ -145,6 +145,26 @@
 +  return -1;
 +}
 +
++/* v1.0.5 (2026-11-23): firmware revision from the ASCII marker "PSWFWREV:rA.B.C" as A*1000000+B*1000+C; -1 without it.
++ * Two v1.0.5 builds (beta r5.25.14, release r5.25.18) share "PSWloader v1.0.5", so the version alone cannot order them. */
++static long psw_fw_rev(const unsigned char *b, size_t n) {
++  static const char tag[] = "PSWFWREV:r";
++  size_t tl = sizeof(tag) - 1;
++  for (size_t i = 0; i + tl + 5 <= n; i++) {
++    if (memcmp(b + i, tag, tl) != 0 || b[i + tl] < '0' || b[i + tl] > '9') continue;
++    long part[3] = {0, 0, 0}; int k = 0; size_t j = i + tl;
++    while (j < n && k < 3) {
++      int d = 0;
++      while (j < n && b[j] >= '0' && b[j] <= '9' && d < 4) { part[k] = part[k] * 10 + (b[j] - '0'); j++; d++; }
++      if (!d) return -1;
++      k++;
++      if (k < 3) { if (j < n && b[j] == '.') j++; else return -1; }
++    }
++    return k == 3 ? part[0] * 1000000 + part[1] * 1000 + part[2] : -1;
++  }
++  return -1;
++}
++
  int fetch_linux(struct linux_info *info) {
    char bzimage_path[256];
    char initrd_path[256];
@@ -160,34 +180,6 @@
 -           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 -  if (bzimage == MAP_FAILED) {
 -    notify("[-] Error could not allocate bzimage.\n");
--    return -1;
--  }
--
--  bzimage_size =
--      read_file(bzimage_path, bzimage, ALIGN_UP(bzimage_size, PAGE_SIZE));
--  if (bzimage_size < 0) {
--    notify("Something went wrong while reading bzImage - Aborting\n");
--    return -1;
--  }
--
--  size_t initrd_size = find_and_get_size_of_file("initrd.img", initrd_path);
--  if (bzimage_size < 0) {
--    notify("File bzImage not found at default paths - Aborting\n");
--    return -1;
--  }
--
--  void *initrd =
--      mmap(NULL, ALIGN_UP(initrd_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
--           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
--  if (initrd == MAP_FAILED) {
--    notify("[-] Error could not allocate initrd.\n");
--    return -1;
--  }
--
--  initrd_size =
--      read_file(initrd_path, initrd, ALIGN_UP(initrd_size, PAGE_SIZE));
--  if (initrd_size < 0) {
--    notify("Something went wrong while reading initrd - Aborting\n");
 -    return -1;
 +  /* v1.0.4: external files in /data/pswloader/ or USB PSW/ override if present; otherwise use embedded firmware so
 +   * PSWloader.elf always starts standalone (even with an NTFS-only USB stick or no USB stick at all). */
@@ -208,9 +200,13 @@
 +        int ev = psw_fw_version(tmp, tl), bv = psw_fw_version(_psw_upl_start, (size_t)(_psw_upl_end - _psw_upl_start));
 +        /* v1.0.5-beta.2: a firmware without the version string (builds from before v1.0, e.g. /data/1360uefi/ps5-upl.bin
 +         * of an early install) counts as older too - it has no restart support and was started instead of ours */
++        long er = psw_fw_rev(tmp, tl), br = psw_fw_rev(_psw_upl_start, (size_t)(_psw_upl_end - _psw_upl_start));
 +        if (bv >= 0 && ev < bv) {
 +          if (ev >= 0) notify("PSWloader: older firmware v1.0.%d in %s ignored, using the built-in v1.0.%d\n", ev, initrd_path, bv);
 +          else notify("PSWloader: old firmware without version in %s ignored, using the built-in v1.0.%d\n", initrd_path, bv);
++          use_emb_upl = 1; use_emb_kernel = 1;
++        } else if (ev == bv && br >= 0 && er < br) {   /* same v1.0.N, older revision (e.g. a beta build) */
++          notify("PSWloader: older firmware revision in %s ignored, using the built-in one\n", initrd_path);
 +          use_emb_upl = 1; use_emb_kernel = 1;
 +        }
 +      }
@@ -220,14 +216,19 @@
 +  if (use_emb_kernel) bzimage_length = (long)(_psw_kernel_end - _psw_kernel_start);
 +  if (use_emb_upl) initrd_length = (long)(_psw_upl_end - _psw_upl_start);
  
--  if (dump_device_firmwares(initrd_path) < 0) {
--    notify(
--        "Something went wrong while dumping device firmwares - Continuing\n");
+-  bzimage_size =
+-      read_file(bzimage_path, bzimage, ALIGN_UP(bzimage_size, PAGE_SIZE));
+-  if (bzimage_size < 0) {
+-    notify("Something went wrong while reading bzImage - Aborting\n");
 +  if (bzimage_length < 2048 + 512 || bzimage_length > 16 * 1024 * 1024 ||
 +      initrd_length < 4096 || initrd_length > 16 * 1024 * 1024) {
 +    notify("PSWloader: firmware files missing or invalid; aborting\n");
-+    return -1;
-+  }
+     return -1;
+   }
+-
+-  size_t initrd_size = find_and_get_size_of_file("initrd.img", initrd_path);
+-  if (bzimage_size < 0) {
+-    notify("File bzImage not found at default paths - Aborting\n");
 +  size_t bzimage_size = (size_t)bzimage_length;
 +  size_t upl_size = (size_t)initrd_length;
 +  size_t wfw_size = 0;
@@ -249,15 +250,26 @@
 +    printf("PSWloader: using embedded pswloader-kernel.bin (%zu bytes)\n", bzimage_size);
 +  } else if (read_file(bzimage_path, bzimage, bzimage_size) != (int)bzimage_size) {
 +    notify("PSWloader: firmware files could not be read completely; aborting\n");
-+    return -1;
-+  }
+     return -1;
+   }
+-
+-  void *initrd =
+-      mmap(NULL, ALIGN_UP(initrd_size, PAGE_SIZE), PROT_READ | PROT_WRITE,
+-           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+-  if (initrd == MAP_FAILED) {
+-    notify("[-] Error could not allocate initrd.\n");
 +  if (use_emb_upl) {
 +    memcpy(initrd, _psw_upl_start, upl_size);
 +    printf("PSWloader: using embedded pswloader-upl.bin (%zu bytes)\n", upl_size);
 +  } else if (read_file(initrd_path, initrd, upl_size) != (int)upl_size) {
 +    notify("PSWloader: firmware files could not be read completely; aborting\n");
-+    return -1;
-+  }
+     return -1;
+   }
+-
+-  initrd_size =
+-      read_file(initrd_path, initrd, ALIGN_UP(initrd_size, PAGE_SIZE));
+-  if (initrd_size < 0) {
+-    notify("Something went wrong while reading initrd - Aborting\n");
 +  const unsigned char *header = bzimage;
 +  unsigned body = (unsigned)header[0x1f4] | ((unsigned)header[0x1f5] << 8) |
 +                  ((unsigned)header[0x1f6] << 16) | ((unsigned)header[0x1f7] << 24);
@@ -265,8 +277,12 @@
 +      body != (bzimage_size - 2048) / 16 || (bzimage_size - 2048) % 16 ||
 +      memcmp(initrd, "PS5UPL01", 8)) {
 +    notify("PSWloader: firmware file has an unexpected format; aborting\n");
-+    return -1;
-+  }
+     return -1;
+   }
+-
+-  if (dump_device_firmwares(initrd_path) < 0) {
+-    notify(
+-        "Something went wrong while dumping device firmwares - Continuing\n");
 +  /* Append console's own IW620 Wi-Fi firmware inside the initrd buffer right after
 +   * the page-aligned UPL ("PS5WFW01" + size + crc32) so both 11.60 alias staging
 +   * and all other firmware wake copies carry it into the UEFI reserved arena. */
@@ -296,11 +312,24 @@
  
    size_t vram_size;
    char buf_vram[16] = {};
+@@ -216,10 +305,10 @@
+         ALIGN_UP(initrd_size, PAGE_SIZE));
+     if (staged) {
+       if (staged == STAGING_REBOOT_FIRST_1160)
+-        notify("11.60 Linux alias staging failed. Nothing is armed. Cold "
++        notify("11.60 firmware alias staging failed. Nothing is armed. Cold "
+                "reboot before trying again.\n");
+       else
+-        notify("11.60 Linux alias staging failed. Nothing is armed, so the "
++        notify("11.60 firmware alias staging failed. Nothing is armed, so the "
+                "loader can be run again.\n");
+       munmap(initrd, ALIGN_UP(initrd_size, PAGE_SIZE));
+       munmap(bzimage, ALIGN_UP(bzimage_size, PAGE_SIZE));
 --- a/source/main.c
 +++ b/source/main.c
 @@ -1,3 +1,6 @@
 +#ifndef PSW_RELEASE_DATE
-+#define PSW_RELEASE_DATE "2026-11-23"
++#define PSW_RELEASE_DATE "2026-11-24"
 +#endif
  #include "hv_defeat_0304.h"
  #include "hv_defeat_0506.h"
@@ -373,6 +402,17 @@
    while (1) {
 --- a/source/utils.c
 +++ b/source/utils.c
+@@ -17,8 +17,8 @@
+ struct linux_info linux_i;
+ 
+ int setup_env(void) {
+-  notify("Welcome to ps5-linux-loader. We'll defeat HV and prepare the system "
+-         "to boot Linux on sleep resume.\n");
++  notify("PSWloader: preparing the console to start the UEFI firmware when it wakes "
++         "from rest mode.\n");
+   if (set_offsets())
+     return -1;
+   if (init_global_vars())
 @@ -356,6 +356,42 @@
    cpuset_setaffinity(3, 1, -1, 0x10, (const cpuset_t *)m);
  }

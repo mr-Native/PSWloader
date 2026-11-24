@@ -1,5 +1,5 @@
 @echo off
-rem psw-drivers.cmd v2.3 (PSWloader v1.0; v2.3: psw-wim.cmd in the background - removes the corner text in the stick's boot.wim for every
+rem psw-drivers.cmd v2.4 (PSWloader v1.0; v2.4: logs of the last 10 Setup starts in PSW\logs; v2.3: psw-wim.cmd in the background - removes the corner text in the stick's boot.wim for every
 rem later start (Windows PE reads it before any script); v2.2: pswsvc v1.8 hidetestmode first - hides the "Test Mode" text in Windows Setup's screen corner (RAM copy of
 rem shell32.dll.mui only); v2.1: pswsvc v1.7 keepawake keeps the setup stick awake in the background (Setup stalled at its first
 rem read of install.swm after the stick had idled in the dialogs - USB selective suspend, powercfg has no effect here); v2.0: TRIM off for this Windows Setup session - with pswdisk reporting a USB SSD as SATA, Windows
@@ -18,7 +18,16 @@ rem firmware r5.22+ before Windows Boot Manager starts). Log: X:\psw-drivers.log
 setlocal enabledelayedexpansion
 set "SRC=%~d0"
 set "LOG=X:\psw-drivers.log"
-echo psw-drivers v2.3 src=%SRC% > %LOG%
+echo psw-drivers v2.4 src=%SRC% > %LOG%
+rem v2.4: the logs of the last 10 Setup starts are kept in PSW\logs\psw-drivers-N.log (a failed start used to be
+rem overwritten by the next one, for example after a restart)
+if not exist "%SRC%\PSW\logs" md "%SRC%\PSW\logs" > nul 2>&1
+set "RUNN=0"
+if exist "%SRC%\PSW\logs\count.txt" set /p RUNN=<"%SRC%\PSW\logs\count.txt"
+set /a RUNN=(RUNN+1) %% 10
+> "%SRC%\PSW\logs\count.txt" echo !RUNN!
+set "HIST=%SRC%\PSW\logs\psw-drivers-!RUNN!.log"
+echo setup start !RUNN! of 0-9, %DATE% %TIME% >> %LOG%
 if exist "%SRC%\PSW\pswsvc.exe" ( "%SRC%\PSW\pswsvc.exe" hidetestmode >> %LOG% 2>&1 )
 rem v2.0: no TRIM in Windows Setup (RAM registry of Windows PE only; the installed Windows keeps TRIM)
 fsutil behavior set DisableDeleteNotify 1 >> %LOG% 2>&1
@@ -61,10 +70,10 @@ if exist "%SRC%\PSW\pswsvc.exe" if exist "%SRC%\PSW\drivers\ps5nvmsi\ps5nvmsi.sy
       bcdedit /store %%B /set {default} testsigning on >> %LOG% 2>&1
       echo bcdedit %%B exit !ERRORLEVEL! >> %LOG%
     )
-    copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1
+    copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1 & copy /y %LOG% "!HIST!" > nul 2>&1
   )
 )
-copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1
+copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1 & copy /y %LOG% "!HIST!" > nul 2>&1
 rem v1.5: restart USB disks that report 0 bytes (stuck USB SSD bridges), before pswdisk and before Setup lists the disks
 if exist "%SRC%\PSW\pswsvc.exe" ( "%SRC%\PSW\pswsvc.exe" usbreset >> %LOG% 2>&1 )
 xcopy /e /i /y "%SRC%\PSW\drivers" X:\PSWDRV\ >> %LOG% 2>&1
@@ -96,16 +105,16 @@ if exist X:\PSWDRV\pswdisk\pswdisk.sys (
   rem pswdisk ran (USB) - stop it, so diskpart and Windows Setup read the disks again with pswdisk active
   "%SRC%\PSW\pswsvc.exe" stop vds >> %LOG% 2>&1
   reg query HKLM\SYSTEM\CurrentControlSet\Services\pswdisk >> %LOG% 2>&1
-  copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1
+  copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1 & copy /y %LOG% "!HIST!" > nul 2>&1
 )
 (echo rescan) > X:\psw-rescan.txt
 diskpart /s X:\psw-rescan.txt >> %LOG% 2>&1
 rem v1.3: what Windows now reports (disk list with type column via list disk + list volume); no per-disk loop: detail
 rem disk on an empty card reader can block
-copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1
+copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1 & copy /y %LOG% "!HIST!" > nul 2>&1
 (echo list disk& echo list volume) > X:\psw-ld.txt
 diskpart /s X:\psw-ld.txt >> %LOG% 2>&1
 rem v2.3: corner text out of the stick's boot.wim (first start only; background, Setup does not wait)
 if exist "%SRC%\PSW\psw-wim.cmd" if not exist "%SRC%\PSW\watermark-patched.txt" start "" /b cmd /c "%SRC%\PSW\psw-wim.cmd" > nul 2>&1
-copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1
+copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1 & copy /y %LOG% "!HIST!" > nul 2>&1
 exit /b 0

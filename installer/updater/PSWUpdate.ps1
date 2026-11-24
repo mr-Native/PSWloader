@@ -165,6 +165,48 @@ if (Test-Path $CertsDir) {
     LogInfo "Step 1/5: No certs directory in payload, skipping."
 }
 
+# 2b. v1.0.5 (GitHub issue 2: GPU driver install failed on a Windows To Go drive that never ran PSWSetup): the GPU driver
+#     needs the console VBIOS in System32\drivers\ps5-vbios.bin and a few registry values that only PSWSetup wrote. The
+#     firmware puts \PS5VBIOS.BIN on the boot EFI partition at every start; copy it (checked like the driver checks it) and
+#     set the same values as PSWSetup, before the driver package is installed.
+try {
+    $vbDst = Join-Path $env:SystemRoot 'System32\drivers\ps5-vbios.bin'
+    $okRom = { param([byte[]]$r) $len = if ($r.Length -ge 3) { [int]$r[2] * 512 } else { 0 }; $sum = 0
+               if ($len -ge 512 -and $len -le $r.Length) { for ($k = 0; $k -lt $len; $k++) { $sum = ($sum + $r[$k]) % 256 } }
+               ($r.Length -ge 3 -and $r[0] -eq 0x55 -and $r[1] -eq 0xAA -and $len -ge 512 -and $len -le $r.Length -and $sum -eq 0) }
+    $have = (Test-Path $vbDst) -and (& $okRom ([IO.File]::ReadAllBytes($vbDst)))
+    if (-not $have) {
+        $letter = $null; foreach ($c in [char[]]'SRQPONMLKJIHGT') { if (-not (Test-Path "${c}:\")) { $letter = $c; break } }
+        $found = $false
+        if ($letter) {
+            $mp = Start-Process -FilePath "$env:SystemRoot\System32\mountvol.exe" -ArgumentList "${letter}: /S" -NoNewWindow -Wait -PassThru
+            try {
+                if ($mp.ExitCode -eq 0 -and (Test-Path "${letter}:\PS5VBIOS.BIN")) {
+                    $rom = [IO.File]::ReadAllBytes("${letter}:\PS5VBIOS.BIN")
+                    if (& $okRom $rom) { [IO.File]::WriteAllBytes($vbDst, $rom); $found = $true; LogOk "GPU: console VBIOS copied from the EFI partition to $vbDst" }
+                    else { LogWarn "GPU: \PS5VBIOS.BIN on the EFI partition is not a valid ROM image" }
+                }
+            } finally { Start-Process -FilePath "$env:SystemRoot\System32\mountvol.exe" -ArgumentList "${letter}: /D" -NoNewWindow -Wait | Out-Null }
+        }
+        if (-not $found) { $script:Warnings++; LogWarn "GPU: no console VBIOS found - start Windows once with PSWloader, then run the updater again" }
+    } else { LogInfo "GPU: console VBIOS present ($vbDst)" }
+    $cs = 'HKLM:\SYSTEM\CurrentControlSet'
+    $regs = @(
+        @("$cs\Services\bc250kmd\Parameters\DefaultsV2", 'EnableDisplayModes', 2),
+        @('HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter', 'DwmForceCpu', 0),
+        @('HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter', 'RequireKmdSwitches', 0),
+        @('HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter', 'DirectFlipFront', 0),
+        @("$cs\Control\GraphicsDrivers", 'TdrDelay', 10),
+        @("$cs\Control\GraphicsDrivers", 'TdrDdiDelay', 10))
+    foreach ($r in $regs) {
+        if (-not (Test-Path $r[0])) { New-Item -Path $r[0] -Force | Out-Null }
+        New-ItemProperty -Path $r[0] -Name $r[1] -Value $r[2] -PropertyType DWord -Force | Out-Null
+    }
+    LogOk "GPU: driver settings set (DefaultsV2, DesktopRouter, TDR) as by PSWSetup"
+} catch {
+    $script:Warnings++; LogWarn "GPU: could not prepare the driver prerequisites: $_"
+}
+
 # 3. Install / update all drivers in payload\drivers\*
 $DriversDir = Join-Path $PayloadDir 'drivers'
 if (Test-Path $DriversDir) {

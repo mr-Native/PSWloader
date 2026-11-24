@@ -1,4 +1,4 @@
-# PSWSetup.ps1 v0.5.7 (v0.5.7: SelfCheck also installs PSWWatch.ps1 + task 'PSWloader Watch' (background log C:\PSWloader\logs\watch); v0.5.6: component SelfCheck - the support tool in C:\PSWloader\selfcheck; v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
+# PSWSetup.ps1 v0.5.8 (v0.5.8: VC_redist gets at most 3 minutes - in SetupComplete it never returned and the Windows setup screens never came; v0.5.7: SelfCheck also installs PSWWatch.ps1 + task 'PSWloader Watch' (background log C:\PSWloader\logs\watch); v0.5.6: component SelfCheck - the support tool in C:\PSWloader\selfcheck; v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
 #   DefaultsV2 value that differs from its compiled factory value (0xC0000182, Code 37), so a fresh install never got a first
 #   driver start; mode 0 comes from the generation override written by ps5-postboot.ps1; v0.5.4: PowerPlan also turns off USB selective suspend and USB 3 link power management (U1/U2) - HW 18.11.:
 #   with selective suspend on, an idle USB SSD (RTL9210B, UAS) on the AMD xHCI does not come back (events 129/153, no more I/O);
@@ -35,7 +35,7 @@ param([ValidateSet('Detect', 'Install', 'Uninstall')][string]$Mode = 'Detect', [
       [string]$Root = '', [string]$Data = "$env:ProgramData\PSWloader")
 $ErrorActionPreference = 'Stop'
 if (-not $Root) { $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }   # v0.4: $PSScriptRoot is empty in param defaults on Windows PowerShell 5.1
-$SetupVersion = '0.5.5'
+$SetupVersion = '0.5.8'
 if ($Version) { "PSWloader Setup $SetupVersion"; return }
 # v0.5.0: data of an older setup (C:\ProgramData\PS5Setup: journal, logs) moves to the PSWloader folder once
 $OldData = "$env:ProgramData\PS5Setup"
@@ -587,7 +587,15 @@ $Comp.VCRedist = @{ Default = $true; Phase = 2   # v0.5.0: Microsoft Visual C++ 
       if ((& $Comp.VCRedist.Detect)[$a]) { continue }
       $f = Test-PayloadFile (Get-PayloadEntry "vcredist/VC_redist.$a.exe")
       if ($PSCmdlet.ShouldProcess("VC_redist.$a.exe", 'install /quiet')) {
-        $pr = Start-Process -FilePath $f -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
+        # v0.5.8 (HW 24.11.: in SetupComplete VC_redist.x64.exe never returned, so PSWSetup and with it SetupComplete never
+        # ended and the Windows setup screens never came - black screen): at most 3 minutes, then the installer and its child
+        # processes are ended and PSWSetup goes on; the runtime is not needed to start Windows.
+        $pr = Start-Process -FilePath $f -ArgumentList '/install', '/quiet', '/norestart' -PassThru
+        if (-not $pr.WaitForExit(180000)) {
+          & taskkill.exe /PID $pr.Id /T /F 2>&1 | Out-Null
+          LogWarn "VC_redist.$a.exe did not finish in 3 minutes - ended, Windows setup goes on (run the updater later to install it)"
+          continue
+        }
         Log "  VC_redist.$a.exe exit $($pr.ExitCode)"
         if ($pr.ExitCode -eq 3010) { $script:RebootNeeded = $true }
         elseif ($pr.ExitCode -ne 0 -and $pr.ExitCode -ne 1638) { LogWarn "VC_redist.$a.exe exit $($pr.ExitCode)" } } }

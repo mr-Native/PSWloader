@@ -45,12 +45,12 @@ Download the files from the [latest release](../../releases/latest).
 4. Plug in the Windows USB installer drive and your target drive, then start **PSWloader.elf**. When the orange light stays on, wake the console.
 5. On the PSWloader screen press `DEL` and pick the Windows USB installer drive. *(FAT32 works on the first boot; if your flashing tool formatted the drive as NTFS, Setup enables test-signing in the drive's BCD on the first start — restart once into PSWloader if disks are not listed yet.)*
 6. Install Windows as usual. If Setup asks about an upgrade, choose **No**. On the internal M.2 SSD, ignore the two tiny reserved partitions (~33 MB and ~17 MB) — they belong to PlayStation (GameOS) and must stay untouched; only delete any other existing partitions and install into the unallocated space.
-7. Each Setup restart returns to GameOS; start **PSWloader.elf** again and Setup continues automatically (you can unplug the USB installer drive after the first restart).
+7. Setup restarts come back through PSWloader by themselves and Setup continues automatically (v1.0.5; you can unplug the USB installer drive after the first restart). If a restart ever ends in GameOS, start **PSWloader.elf** again.
 8. Before the first sign-in, all PS5 drivers and tools are installed automatically. On the first Desktop sign-in, confirm the restart prompt to activate all drivers.
 9. Press `ESC` on the PSWloader screen to open the UEFI menu: under *Boot → Boot order*, move the installed Windows drive to the top if needed, and optionally configure power presets and enable **Fast Boot** for faster startups.
 
-Windows runs in test-signing mode because the drivers are not signed by Microsoft. Games whose anti-cheat refuses test
-mode will not start.
+Windows runs in test-signing mode because the drivers are not signed by Microsoft. There is no Secure Boot and no TPM 2.0
+either. Games whose anti-cheat refuses test mode, or requires Secure Boot or TPM 2.0, will not start.
 
 PSWloader does not write to the console's flash or to GameOS data. On the internal SSD Windows only sees the area
 behind GameOS, and writes into the GameOS area are blocked. Back up anything important before installing anyway.

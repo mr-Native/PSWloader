@@ -34,6 +34,7 @@ def prepare_windows_boot(root,implementation,setup_menu=False):
         protocol_anchor+'  gEfiSimpleFileSystemProtocolGuid ## CONSUMES\n'
         '  gEfiPartitionInfoProtocolGuid ## CONSUMES\n'
         '  gEfiBlockIoProtocolGuid ## CONSUMES\n'
+        '  gEfiUsbIoProtocolGuid ## CONSUMES\n'
         '  gEfiBlockIo2ProtocolGuid ## CONSUMES\n'
         '  gEfiDevicePathProtocolGuid ## CONSUMES\n'
         '  gEfiMpServiceProtocolGuid ## CONSUMES\n'

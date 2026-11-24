@@ -42,10 +42,17 @@ class BootMediumWaitTests(unittest.TestCase):
         recover = SOURCE[SOURCE.index('STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)'):SOURCE.index('STATIC VOID Ps5StartDisplay (VOID)')]
         self.assertIn('Class[2]!=0x0c || Class[1]!=0x03 || Class[0]!=0x30', recover)          # xHCI only
         self.assertIn('if (!PowerCycle) continue;', recover)                                  # status calls change nothing
-        # power off while the driver still runs, wait two seconds (r5.25.11: one pause for all controllers), then stop and start
-        order = [recover.index(x) for x in ('V=(V&PS5_XHCI_PORT_NEUTRAL)&~PS5_XHCI_PORT_POWER;', 'if (Cy) gBS->Stall(2000000);',
+        # power off while the driver still runs, wait two seconds (r5.25.11: one pause for all controllers), then the same
+        # ports get their power back (r5.25.16: no controller restart - it disturbed the boot disk on the same controller)
+        order = [recover.index(x) for x in ('V=(V&PS5_XHCI_PORT_NEUTRAL)&~PS5_XHCI_PORT_POWER;', 'ConsoleSnapshot(); gBS->Stall(2000000); }',
                                              'gBS->DisconnectController(CyH[K],NULL,NULL);', 'gBS->ConnectController(CyH[K],NULL,NULL,TRUE);')]
         self.assertEqual(order, sorted(order))
+        # r5.25.17: a controller with the boot medium or a working disk (no 0-byte disk) is left alone
+        self.assertIn('carries a working USB disk - controller and its ports left alone', recover)
+        # r5.25.19: only after a restart from Windows (warm-log cell); a start from GameOS cycles and restarts as before
+        skip = recover[recover.index('controller and its ports left alone')-400:recover.index('controller and its ports left alone')]
+        self.assertIn('PS5_WARM_LOGCELL==0x31474F4C4D524157ULL', skip)
+        self.assertLess(recover.index('controller and its ports left alone'), recover.index('V=(V&PS5_XHCI_PORT_NEUTRAL)&~PS5_XHCI_PORT_POWER;'))
         # PORTSC is written without its write-1-to-clear bits (bit 1 PED, bits 17..23), without PR and without WPR
         self.assertEqual(0x4e00ffe9 & ((1 << 1) | (1 << 4) | (0x7f << 17) | (1 << 31)), 0)
         self.assertEqual(0x4e00ffe9 & 0x200, 0x200)
@@ -56,8 +63,9 @@ class BootMediumWaitTests(unittest.TestCase):
         self.assertIn('return (UINT32)((USB_DEVICE_PATH *)Nx)->ParentPortNumber+1;', SOURCE)   # r5.25.3: Ps5RootPortOf
         self.assertIn('KeepPort=Ps5RootPortOf(KeepDp,HcDp,HcLen);', recover)
         # r5.25.3: ports with a working USB device stay powered; no controller restart when nothing needs a cycle
-        self.assertIn('if ((V&3U)==3U && !(ZeroMask&(1U<<P))', recover)   # r5.25.11: + warm-run condition
-        self.assertLess(recover.index('if (Off==0)'), recover.index('if (Cy) gBS->Stall(2000000);'))
+        # r5.25.19: no 'connected + enabled = left alone' exemption any more (it kept a stuck RTL9210B powered)
+        self.assertNotIn('if ((V&3U)==3U', recover)
+        self.assertLess(recover.index('if (Off==0)'), recover.index('ConsoleSnapshot(); gBS->Stall(2000000); }'))
         self.assertIn('Ps5UsbRecover(TRUE,Selected);', BODY)
         # the hold is decided before the boot list, and the no-medium path never power-cycles during it
         self.assertLess(BODY.index('BOOLEAN CycleHold=FALSE;'), BODY.index('BOOLEAN ListDecided=FALSE;'))
@@ -75,7 +83,10 @@ class BootMediumWaitTests(unittest.TestCase):
         self.assertIn('if (CycleDone && CycleAt+PS5_WARM_USB_WAIT_ATTEMPTS>Limit) Limit=CycleAt+PS5_WARM_USB_WAIT_ATTEMPTS;', warm)
         self.assertLess(warm.index('Limit=CycleAt+'), warm.index('if (Attempt<Limit) {'))
         self.assertLess(warm.index('if (Attempt<Limit) {'), warm.index('Ps5WarmColdRestart("target not found");'))
-        self.assertIn('mPs5CycleOnlyZero=TRUE; mRecoverSilent=TRUE; Ps5UsbRecover(TRUE,NULL);', warm)
+        # r5.25.23: after 5 s every port without a working disk, even on a controller with a working disk
+        self.assertIn('mPs5ForceCycle=TRUE; mRecoverSilent=TRUE; Ps5UsbRecover(TRUE,NULL); mRecoverSilent=FALSE; mPs5ForceCycle=FALSE;', warm)
+        self.assertIn('if (PowerCycle && !mPs5ForceCycle && *(volatile UINT64 *)(UINTN)PS5_WARM_LOGCELL', SOURCE)
+        self.assertIn('Late==100 && !(mPs5WarmDirect && mPs5WarmUsb)', SOURCE)
 
     def test_restart_shows_start_screen_unless_fast_restart(self):
         # r5.25.12 (user): a restart from Windows shows the start screen like a cold start (fastboot: 3 or 15 s);
@@ -92,3 +103,12 @@ class BootMediumWaitTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WarmInstallerToInstalledTests(unittest.TestCase):
+    def test_restart_from_installer_boots_installed_windows(self):   # r5.25.22
+        warm = SOURCE[SOURCE.index('    if (mPs5WarmDirect) {'):]
+        warm = warm[:warm.index('    } else if (BootListN) {')]
+        self.assertIn('!Ps5VolumeHasFile(T,L"\\\\EFI\\\\Microsoft\\\\Boot\\\\BCD")', warm)
+        self.assertIn('T=UsbInstalled;', warm)
+        self.assertLess(warm.index('T=UsbInstalled;'), warm.index('Selected=T; ListDecided=TRUE; mPs5WarmDirectHit=TRUE;'))
