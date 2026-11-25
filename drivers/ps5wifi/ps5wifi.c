@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only
- * ps5wifi v1.0.0 - NDIS 6.20 Native 802.11 miniport for the PS5 Wi-Fi 6 adapter
+ * ps5wifi v1.0.5 - NDIS 6.20 Native 802.11 miniport for the PS5 Wi-Fi 6 adapter
  * (NXP/Marvell 88W9097 "IW620", PCI 1B4B:2B56) on native Windows 11.
  *
  * Hardware programming model follows nxp-imx/mwifiex (lf-6.18.2_1.0.0) and the
@@ -27,7 +27,7 @@
 #define POLL_MS             2u
 
 #define MAX_BSS_ENTRIES     64u
-#define MAX_BSS_IE_BYTES    512u
+#define MAX_BSS_IE_BYTES    1024u
 
 /* Reloc anchor so lld-link always emits .reloc (avoids Code 39) */
 static void * volatile g_reloc_anchor = (void *)&g_reloc_anchor;
@@ -107,6 +107,7 @@ typedef struct _WIFI_ADAPTER {
     DOT11_CIPHER_ALGORITHM mcast_cipher;
     ULONG default_key_id;
     BOOLEAN connected;
+    BOOLEAN gtk_set;
     BOOLEAN assoc_in_progress;
     LONG paused;
     LONG halting;
@@ -739,6 +740,52 @@ static VOID indicate_link_state(PWIFI_ADAPTER a, BOOLEAN up) {
 
 static VOID iw620_poll_events(PWIFI_ADAPTER a);
 
+/* Own RSN IE for the association: the AP's group cipher, exactly one pairwise
+ * cipher (CCMP) and one AKM, no capabilities. Windows' supplicant repeats the
+ * IE from the association request in 4-way message 2, so the same bytes go to
+ * the firmware and into the association completion. Returns 0 if the AP has no
+ * RSN IE with CCMP. */
+static ULONG build_own_rsn_ie(const BSS_ENTRY *t, DOT11_AUTH_ALGORITHM algo, UCHAR *out) {
+    static const UCHAR oui[3] = { 0x00, 0x0F, 0xAC };
+    const UCHAR *ie = t->ie, *end = t->ie + t->ie_len;
+    if (algo != DOT11_AUTH_ALGO_RSNA_PSK && algo != DOT11_AUTH_ALGO_RSNA) return 0;
+    while (ie + 2 <= end) {
+        UCHAR id = ie[0], len = ie[1];
+        if (ie + 2 + len > end) return 0;
+        if (id == 0x30) {
+            const UCHAR *b = ie + 2, *e = b + len;
+            if (len < 8 || b[0] != 1 || b[1] != 0) return 0;
+            const UCHAR *group = b + 2;
+            const UCHAR *q = b + 6;
+            if (q + 2 > e) return 0;
+            USHORT n = (USHORT)(q[0] | (q[1] << 8)); q += 2;
+            BOOLEAN ccmp = FALSE;
+            for (USHORT i = 0; i < n; i++, q += 4) {
+                if (q + 4 > e) return 0;
+                if (RtlEqualMemory(q, oui, 3) && q[3] == 4) ccmp = TRUE;
+            }
+            if (!ccmp) return 0;
+            out[0] = 0x30; out[1] = 20;
+            out[2] = 1; out[3] = 0;
+            RtlCopyMemory(out + 4, group, 4);
+            out[8] = 1; out[9] = 0; RtlCopyMemory(out + 10, oui, 3); out[13] = 4;
+            out[14] = 1; out[15] = 0; RtlCopyMemory(out + 16, oui, 3);
+            out[19] = (algo == DOT11_AUTH_ALGO_RSNA_PSK) ? 2 : 1;
+            out[20] = 0; out[21] = 0;
+            return 22;
+        }
+        ie += 2 + len;
+    }
+    return 0;
+}
+
+/* Length of the leading run of complete IEs (a cut beacon may end mid-IE). */
+static ULONG whole_ies_len(const UCHAR *ie, ULONG len) {
+    ULONG pos = 0;
+    while (pos + 2 <= len && pos + 2u + ie[pos + 1] <= len) pos += 2u + ie[pos + 1];
+    return pos;
+}
+
 static VOID iw620_do_connect(PWIFI_ADAPTER a) {
     /* Locate matching BSS from scan cache */
     BSS_ENTRY *target = NULL;
@@ -770,6 +817,8 @@ static VOID iw620_do_connect(PWIFI_ADAPTER a) {
     }
 
     BOOLEAN ok = FALSE;
+    UCHAR rsn_ie[22];
+    ULONG rsn_len = 0;
     if (target && a->hw_ready) {
         /* 2. ASSOCIATION_START */
         {
@@ -852,20 +901,15 @@ static VOID iw620_do_connect(PWIFI_ADAPTER a) {
         cp->chan_number = (UCHAR)target->channel;
         pos += sizeof(CHAN_SCAN_PARAM);
 
-        /* Copy RSN IE (0x30) from target beacon if present */
-        const UCHAR *ie = target->ie;
-        while (ie + 2 <= target->ie + target->ie_len) {
-            UCHAR id = ie[0], ilen = ie[1];
-            if (ie + 2 + ilen > target->ie + target->ie_len) break;
-            if (id == 0x30 && pos + 4 + ilen < sizeof(req)) {
-                t = (TLV_HDR *)(req + pos);
-                t->type = TLV_TYPE_RSN; t->len = ilen;
-                pos += sizeof(TLV_HDR);
-                RtlCopyMemory(req + pos, ie + 2, ilen);
-                pos += ilen;
-                break;
-            }
-            ie += 2 + ilen;
+        /* Own RSN IE (one pairwise cipher, one AKM); a copy of the beacon's
+         * IE is invalid when the AP offers several AKMs or ciphers. */
+        rsn_len = build_own_rsn_ie(target, a->auth_algo, rsn_ie);
+        if (rsn_len && pos + sizeof(TLV_HDR) + rsn_len - 2 < sizeof(req)) {
+            t = (TLV_HDR *)(req + pos);
+            t->type = TLV_TYPE_RSN; t->len = (USHORT)(rsn_len - 2);
+            pos += sizeof(TLV_HDR);
+            RtlCopyMemory(req + pos, rsn_ie + 2, rsn_len - 2);
+            pos += (USHORT)(rsn_len - 2);
         }
 
         /* Clear any stale firmware STA/TX-queue state before associating */
@@ -908,35 +952,66 @@ static VOID iw620_do_connect(PWIFI_ADAPTER a) {
             }
             ok = TRUE;
             a->connected = TRUE;
+            a->gtk_set = FALSE;
             a->cur_channel = target->channel;
             RtlCopyMemory(a->assoc_bssid, target->bssid, 6);
+            a->cur_phy_id = target->phy_id;
             diag_write_dword(L"AssocState", 1);
         }
 
-        /* 3. ASSOCIATION_COMPLETION */
+        /* 3. ASSOCIATION_COMPLETION, followed by the association request body,
+         * the beacon body and the active PHY list. Windows' WPA2 supplicant
+         * needs the RSN IEs of both frames for the 4-way handshake. */
         {
+            static UCHAR abuf[sizeof(DOT11_ASSOCIATION_COMPLETION_PARAMETERS) + 128 + 12 + MAX_BSS_IE_BYTES + 8];
             DOT11_ASSOCIATION_COMPLETION_PARAMETERS ac;
             NDIS_STATUS_INDICATION ind;
+            ULONG used = sizeof(ac);
             RtlZeroMemory(&ac, sizeof(ac));
+            RtlZeroMemory(abuf, sizeof(abuf));
             ac.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
             ac.Header.Revision = DOT11_ASSOCIATION_COMPLETION_PARAMETERS_REVISION_1;
             ac.Header.Size = sizeof(ac);
             RtlCopyMemory(ac.MacAddr, target->bssid, 6);
             ac.uStatus = ok ? DOT11_ASSOC_STATUS_SUCCESS : DOT11_ASSOC_STATUS_UNREACHABLE;
-            ac.AuthAlgo = a->auth_algo;
-            ac.UnicastCipher = a->ucast_cipher;
-            ac.MulticastCipher = a->mcast_cipher;
-            ac.bFourAddressSupported = FALSE;
-            ac.bPortAuthorized = (a->auth_algo == DOT11_AUTH_ALGO_80211_OPEN) ? TRUE : FALSE;
-            ac.ucActiveQoSProtocol = 0;
+            if (ok) {
+                UCHAR *f = abuf + used;
+                ULONG n = 0;
+                /* Association request body: capability, listen interval, SSID, rates, RSN */
+                f[n++] = (UCHAR)target->cap_info; f[n++] = (UCHAR)(target->cap_info >> 8);
+                f[n++] = 10; f[n++] = 0;
+                f[n++] = 0; f[n++] = (UCHAR)target->ssid_len;
+                RtlCopyMemory(f + n, target->ssid, target->ssid_len); n += target->ssid_len;
+                f[n++] = 1; f[n++] = (UCHAR)rsz;
+                RtlCopyMemory(f + n, rbuf, rsz); n += rsz;
+                if (rsn_len) { RtlCopyMemory(f + n, rsn_ie, rsn_len); n += rsn_len; }
+                ac.uAssocReqOffset = used; ac.uAssocReqSize = n; used += n;
+                /* Beacon/probe response body: timestamp, interval, capability, IEs */
+                f = abuf + used; n = 0;
+                RtlCopyMemory(f, &target->timestamp, 8); n = 8;
+                f[n++] = (UCHAR)target->beacon_period; f[n++] = (UCHAR)(target->beacon_period >> 8);
+                f[n++] = (UCHAR)target->cap_info; f[n++] = (UCHAR)(target->cap_info >> 8);
+                ULONG il = whole_ies_len(target->ie, target->ie_len);
+                RtlCopyMemory(f + n, target->ie, il); n += il;
+                ac.uBeaconOffset = used; ac.uBeaconSize = n; used += n;
+                used = (used + 3u) & ~3u;
+                *(ULONG *)(abuf + used) = target->phy_id;
+                ac.uActivePhyListOffset = used; ac.uActivePhyListSize = sizeof(ULONG); used += sizeof(ULONG);
+                ac.AuthAlgo = a->auth_algo;
+                ac.UnicastCipher = a->ucast_cipher;
+                ac.MulticastCipher = a->mcast_cipher;
+                ac.bPortAuthorized = (a->auth_algo == DOT11_AUTH_ALGO_80211_OPEN) ? TRUE : FALSE;
+                ac.DSInfo = DOT11_DS_CHANGED;
+            }
+            RtlCopyMemory(abuf, &ac, sizeof(ac));
             RtlZeroMemory(&ind, sizeof(ind));
             ind.Header.Type = NDIS_OBJECT_TYPE_STATUS_INDICATION;
             ind.Header.Revision = NDIS_STATUS_INDICATION_REVISION_1;
             ind.Header.Size = NDIS_SIZEOF_STATUS_INDICATION_REVISION_1;
             ind.SourceHandle = a->handle;
             ind.StatusCode = NDIS_STATUS_DOT11_ASSOCIATION_COMPLETION;
-            ind.StatusBuffer = &ac;
-            ind.StatusBufferSize = sizeof(ac);
+            ind.StatusBuffer = abuf;
+            ind.StatusBufferSize = used;
             NdisMIndicateStatusEx(a->handle, &ind);
         }
     }
@@ -995,27 +1070,44 @@ static VOID iw620_do_disconnect(PWIFI_ADAPTER a) {
     }
 }
 
+/* Windows hands CCMP keys over as DOT11_KEY_ALGO_CCMP (IV48 counter, length,
+ * key: 28 bytes for a 128-bit key); accept a raw 16-byte key as well. */
+static const UCHAR *ccmp_key(const UCHAR *k, USHORT len, const UCHAR **pn) {
+    *pn = NULL;
+    if (len == 16) return k;
+    if (len >= FIELD_OFFSET(DOT11_KEY_ALGO_CCMP, ucCCMPKey) + 16) {
+        const DOT11_KEY_ALGO_CCMP *c = (const DOT11_KEY_ALGO_CCMP *)k;
+        if (c->ulCCMPKeyLength == 16) { *pn = c->ucIV48Counter; return c->ucCCMPKey; }
+    }
+    return NULL;
+}
+
 static VOID iw620_set_key(PWIFI_ADAPTER a, const UCHAR *mac, UCHAR idx, BOOLEAN is_ucast,
-                          UCHAR key_type, const UCHAR *key, USHORT key_len)
+                          UCHAR key_type, const UCHAR *key, USHORT key_len, const UCHAR *pn)
 {
+    /* Same layout and flags as mwifiex_cmd_802_11_key_material_v2 (station, WPA2). */
     if (!a->hw_ready || key_len > 32) return;
     UCHAR buf[sizeof(USHORT) + sizeof(TLV_HDR) + sizeof(KEY_PARAM_V2)];
     RtlZeroMemory(buf, sizeof(buf));
     *(USHORT *)buf = 1; /* HostCmd_ACT_GEN_SET */
     TLV_HDR *t = (TLV_HDR *)(buf + 2);
-    t->type = TLV_TYPE_KEY_MATERIAL;
-    t->len = (USHORT)(sizeof(KEY_PARAM_V2) - 32 + key_len);
+    t->type = TLV_TYPE_KEY_PARAM_V2;
+    t->len = (USHORT)sizeof(KEY_PARAM_V2);
     KEY_PARAM_V2 *kp = (KEY_PARAM_V2 *)(buf + 2 + sizeof(TLV_HDR));
-    if (mac) RtlCopyMemory(kp->mac_addr, mac, 6);
+    if (mac && is_ucast) RtlCopyMemory(kp->mac_addr, mac, 6);
     else RtlFillMemory(kp->mac_addr, 6, 0xFF);
-    kp->key_idx = idx;
-    kp->is_default = is_ucast ? 0 : 1;
-    kp->key_info = KEY_INFO_ENABLE_KEY | KEY_INFO_TX_KEY | KEY_INFO_RX_KEY |
-                   (is_ucast ? KEY_INFO_UCAST_KEY : (KEY_INFO_MCAST_KEY | KEY_INFO_DEFAULT_KEY));
+    kp->key_idx = (UCHAR)(idx & 0x0F);
     kp->key_type = key_type;
+    kp->key_info = KEY_INFO_ENABLE_KEY |
+                   (is_ucast ? (KEY_INFO_UCAST_KEY | KEY_INFO_TX_KEY | KEY_INFO_RX_KEY)
+                             : (KEY_INFO_MCAST_KEY | KEY_INFO_RX_KEY));
+    if (!a->gtk_set) kp->key_info |= KEY_INFO_DEFAULT_KEY;
+    if (pn) RtlCopyMemory(kp->pn, pn, 6);
     kp->key_len = key_len;
     if (key_len) RtlCopyMemory(kp->key, key, key_len);
-    (VOID)iw620_exec_cmd(a, CMD_802_11_KEY_MATERIAL, buf, (USHORT)(2 + sizeof(TLV_HDR) + t->len), NULL, NULL, 1000);
+    BOOLEAN ok = iw620_exec_cmd(a, CMD_802_11_KEY_MATERIAL, buf, (USHORT)sizeof(buf), NULL, NULL, 1000);
+    if (ok && !is_ucast) a->gtk_set = TRUE;
+    diag_write_dword(is_ucast ? L"PtkSet" : L"GtkSet", ok ? 1u : 0x80000000u);
 }
 
 /* ---- TX & RX Data Path (802.11 <-> 802.3 + IW620 TxPD/RxPD) ------------------ */
@@ -1711,8 +1803,10 @@ static NDIS_STATUS MiniportOidRequest(NDIS_HANDLE ctx, PNDIS_OID_REQUEST req) {
         case OID_DOT11_CIPHER_DEFAULT_KEY:
             if (len >= sizeof(DOT11_CIPHER_DEFAULT_KEY_VALUE)) {
                 PDOT11_CIPHER_DEFAULT_KEY_VALUE kv = (PDOT11_CIPHER_DEFAULT_KEY_VALUE)buf;
-                if (!kv->bDelete && kv->AlgorithmId == DOT11_CIPHER_ALGO_CCMP && kv->usKeyLength == 16) {
-                    iw620_set_key(a, NULL, (UCHAR)kv->uKeyIndex, FALSE, KEY_TYPE_ID_AES, kv->ucKey, 16);
+                const UCHAR *pn, *k = ccmp_key(kv->ucKey, kv->usKeyLength, &pn);
+                if (!kv->bDelete && kv->AlgorithmId == DOT11_CIPHER_ALGO_CCMP && k
+                        && len >= (ULONG)(FIELD_OFFSET(DOT11_CIPHER_DEFAULT_KEY_VALUE, ucKey) + kv->usKeyLength)) {
+                    iw620_set_key(a, NULL, (UCHAR)kv->uKeyIndex, FALSE, KEY_TYPE_ID_AES, k, 16, pn);
                 }
             }
             break;
@@ -1720,8 +1814,11 @@ static NDIS_STATUS MiniportOidRequest(NDIS_HANDLE ctx, PNDIS_OID_REQUEST req) {
             if (len >= sizeof(DOT11_BYTE_ARRAY) + sizeof(DOT11_CIPHER_KEY_MAPPING_KEY_VALUE)) {
                 PDOT11_BYTE_ARRAY ba = (PDOT11_BYTE_ARRAY)buf;
                 PDOT11_CIPHER_KEY_MAPPING_KEY_VALUE kv = (PDOT11_CIPHER_KEY_MAPPING_KEY_VALUE)ba->ucBuffer;
-                if (!kv->bDelete && kv->AlgorithmId == DOT11_CIPHER_ALGO_CCMP && kv->usKeyLength == 16) {
-                    iw620_set_key(a, kv->PeerMacAddr, 0, TRUE, KEY_TYPE_ID_AES, kv->ucKey, 16);
+                const UCHAR *pn, *k = ccmp_key(kv->ucKey, kv->usKeyLength, &pn);
+                if (!kv->bDelete && kv->AlgorithmId == DOT11_CIPHER_ALGO_CCMP && k
+                        && len >= (ULONG)(FIELD_OFFSET(DOT11_BYTE_ARRAY, ucBuffer)
+                                          + FIELD_OFFSET(DOT11_CIPHER_KEY_MAPPING_KEY_VALUE, ucKey) + kv->usKeyLength)) {
+                    iw620_set_key(a, kv->PeerMacAddr, 0, TRUE, KEY_TYPE_ID_AES, k, 16, pn);
                 }
             }
             break;
@@ -2135,10 +2232,30 @@ static VOID MiniportCancelOid(NDIS_HANDLE ctx, PVOID id) {
     UNREFERENCED_PARAMETER(ctx); UNREFERENCED_PARAMETER(id);
 }
 
+/* v1.0.5: at shutdown/restart the IW620 must stop writing into host memory. The restart goes through the
+ * PSWloader firmware (warm re-entry) without a power cycle, so a running RX/event DMA ring would keep writing
+ * into memory that now belongs to the loader and the firmware. Like mwifiex: leave the BSS, FUNC_SHUTDOWN,
+ * then bus mastering off. On a bugcheck (high IRQL) only the flag is set. */
 static VOID MiniportShutdownEx(NDIS_HANDLE ctx, NDIS_SHUTDOWN_ACTION action) {
-    UNREFERENCED_PARAMETER(action);
     PWIFI_ADAPTER a = (PWIFI_ADAPTER)ctx;
     InterlockedExchange(&a->halting, 1);
+    if (action != NdisShutdownPowerOff || KeGetCurrentIrql() > DISPATCH_LEVEL) return;
+    if (a->timer) NdisCancelTimerObject(a->timer);
+    if (a->hw_ready) {
+        if (a->connected) {
+            CMD_DEAUTH_BODY d;
+            RtlCopyMemory(d.mac_addr, a->assoc_bssid, 6);
+            d.reason_code = 3;
+            (VOID)iw620_exec_cmd(a, CMD_802_11_DEAUTH, &d, sizeof(d), NULL, NULL, 500);
+        }
+        (VOID)iw620_exec_cmd(a, CMD_FUNC_SHUTDOWN, NULL, 0, NULL, NULL, 500);
+        a->hw_ready = FALSE;
+    }
+    USHORT cmd = 0;
+    if (NdisMGetBusData(a->handle, PCI_WHICHSPACE_CONFIG, 4, &cmd, sizeof(cmd)) == sizeof(cmd)) {
+        cmd &= (USHORT)~0x0004u;   /* PCI command: bus master off */
+        (VOID)NdisMSetBusData(a->handle, PCI_WHICHSPACE_CONFIG, 4, &cmd, sizeof(cmd));
+    }
 }
 
 static VOID MiniportDevicePnPEvent(NDIS_HANDLE ctx, PNET_DEVICE_PNP_EVENT ev) {

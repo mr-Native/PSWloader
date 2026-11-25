@@ -11,7 +11,7 @@ Existing Windows 11 installations can be updated in-place without reinstalling W
 
 ## Firmware updates without replacing PSWloader.elf
 
-Since the PSWloader.elf release of 2026-11-23 the ELF no longer has to be replaced for firmware updates. The updater puts
+Since the PSWloader.elf release of 2026-11-25 the ELF no longer has to be replaced for firmware updates. The updater puts
 the new firmware on the EFI partition (`\PSWloader\firmware\pswloader-upl.bin`). At the next start the firmware built
 into the ELF sees the newer one there and switches to it; Windows restarts then use it directly.
 
@@ -20,8 +20,7 @@ says `failed`) and the built-in firmware keeps working. Deleting the `\PSWloader
 built-in firmware.
 
 Replace `PSWloader.elf` only when a release says so (for example for new GameOS system software). Older ELFs (v1.0.5 and
-earlier) do not have this: with them, replace `PSWloader.elf` once with the 2026-11-23 release.
-
+earlier) do not have this: with them, replace `PSWloader.elf` once with the 2026-11-25 release.
 
 Every run writes a log to:
 

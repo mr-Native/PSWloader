@@ -23,7 +23,7 @@
 #include <Library/UefiLib.h>
 #include <Protocol/SimpleTextOut.h>
 #include "ps5-time-calendar.h"
-#define PS5_FW_RELEASE "r5.25.23"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG, r5.25.13: SMBIOS BIOS version); bump with every build */
+#define PS5_FW_RELEASE "r5.26.6"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG, r5.25.13: SMBIOS BIOS version); bump with every build */
 #include "ps5-extapic.h"
 #ifdef PS5_WARM_BS_TRACE
 #include "ps5-bs-trace.h"
@@ -41,7 +41,7 @@ STATIC BOOLEAN mPs5BsTraceWarm;   /* lab: set by Ps5WarmReadRecord on a warm run
 #define PS5_QUIET_SCREEN 1
 #endif
 #define PS5_BRAND_TITLE L"PSWloader"   /* r5.17: product name (user 17.11.2026) */
-#define PS5_BRAND_VERSION L"v1.0.5"
+#define PS5_BRAND_VERSION L"v1.1"
 #if PS5_QUIET_SCREEN
 #define PS5_SCREEN(...) do{CHAR16 Ps5Q_[256];UnicodeSPrint(Ps5Q_,sizeof(Ps5Q_),__VA_ARGS__);DEBUG((DEBUG_INFO,"PS5 screen (quiet): %s",Ps5Q_));}while(0)
 #else
@@ -384,6 +384,7 @@ STATIC UINT64 mPs5CycleTsc;        /* r5.25.3: TSC of the last power cycle that 
 STATIC UINTN  mPs5CycleWant;       /* r5.25.3: working USB disks expected after it (working before + cycled 0-byte disks) */
 STATIC BOOLEAN mPs5CycleOnlyZero;  /* r5.25.4: menu entry - cycle only ports with a 0-byte USB disk, nothing else */
 STATIC BOOLEAN mPs5ForceCycle;     /* r5.25.23: warm USB target missing - cycle even a controller that carries a working disk */
+STATIC BOOLEAN mPs5FullCycleRan;   /* r5.26.6: a full port power cycle ran in this start (the pre-boot hook then does nothing) */
 STATIC UINTN Ps5UsbWorkingDisks(VOID)   /* whole-disk BlockIo behind USB with a size */
 {
   EFI_HANDLE *H=NULL;UINTN N=0,C=0;
@@ -433,6 +434,7 @@ STATIC VOID Ps5LogUsbPorts (CONST CHAR8 *When)
 }
 STATIC VOID Ps5UsbRecover (BOOLEAN PowerCycle, EFI_HANDLE Keep)
 {
+  if (PowerCycle && !mPs5CycleOnlyZero) mPs5FullCycleRan=TRUE;   /* r5.26.6 */
   EFI_HANDLE *Pci=NULL; UINTN N=0; UINT32 Hc=0;
   /* r5.25.11 (boot timing: 2 x 2 s of the 6.3 s before bootmgr were two sequential power-off pauses): the ports of every
    * controller are switched off first, then ONE pause of 2 s, then every controller is restarted */
@@ -1157,20 +1159,55 @@ STATIC VOID EFIAPI Ps5BcdReadyToBoot(EFI_EVENT Event,VOID *Context)
  * GET/SET/verify (ps5-fan.h); it also logs the curset and duty it found (the EMC state before any Windows task). */
 #include "ps5-hdmi-video-protocol.h"
 #include "ps5-fan.h"
-STATIC VOID Ps5ApplyFanTarget(CONST CHAR8 *When) {
+#include "ps5-fan-quiet.h"   /* r5.26.4 */
+STATIC VOID Ps5ApplyFanTarget(CONST CHAR8 *When,EFI_HANDLE Esp) {
   STATIC UINT32 Applied=0;
+  STATIC UINT8 Original[0x6ae];   /* PS5_FC_SERVO_SIZE */
   PS5_HDMI_VIDEO_PROTOCOL *Video=NULL;
-  UINT32 Target=ps5_fan_target_for_preset(mPs5Set.preset),Before=0,After=0,D0=0,D1=0;
-  PS5_POWER_PRESET V;UINTN VSize=sizeof(V);
-  if(!EFI_ERROR(gRT->GetVariable(L"Ps5PowerPreset",&mPs5PresetGuid,NULL,&VSize,&V)) && VSize==sizeof(V) && V.Preset<=2)
-    Target=ps5_fan_target_for_preset(V.Preset);
-  if(Target==Applied)return;
-  if(EFI_ERROR(gBS->LocateProtocol(&mPs5HdmiVideoGuid,NULL,(VOID **)&Video)) || !Video || !Video->Fan) {
-    DEBUG((DEBUG_ERROR,"PS5 fan: %a: no HDMI/ICC protocol, target %u C not set\n",When,Target));return; }
-  EFI_STATUS S=Video->Fan(Target,&Before,&After,&D0,&D1);
-  if(!EFI_ERROR(S))Applied=Target;
-  DEBUG((DEBUG_ERROR,"PS5 fan: %a: preset target %u C: %r (EMC had %u C, now %u C, duty %u.%u%%)\n",When,Target,S,Before,After,
-    D1<=1024?D1*100/1024:0,D1<=1024?(D1*1000/1024)%10:0));
+  /* r5.26.2 (user 24.11.: the fan still spun up at every Windows start): r5.26.1 left the EMC at the GameOS table (target
+   * 91 C), so the fan stayed at ~10 % through the firmware and Windows start, the MainSoC reached ~76 C and the PS5 Linux
+   * curve in ps5pwr then had to ramp the fan up hard. PS5 Linux reaches its fan driver seconds after GameOS; we take
+   * minutes. Now the EMC gets the quiet backup servo table of PS5 Linux fan.c as early as the settings are known and
+   * regulates by itself (auto) until ps5pwr drives the curve - also in Windows Setup and WinPE, where no ps5pwr runs. The
+   * GameOS table goes to ps5pwr in the volatile variable PswFanOriginal (restored at shutdown). The presets still set the
+   * clock limits. */
+  UINT32 Flags=0,D0=0,D1=0;INT32 T=-1;
+  if(Applied)return;
+  if(EFI_ERROR(gBS->LocateProtocol(&mPs5HdmiVideoGuid,NULL,(VOID **)&Video)) || !Video || !Video->FanQuiet) {
+    DEBUG((DEBUG_ERROR,"PS5 fan: %a: no HDMI/ICC protocol, EMC table unchanged\n",When));return; }
+  EFI_STATUS S=Video->FanQuiet(Original,sizeof(Original),&Flags,&D0,&D1,&T);
+  if(!EFI_ERROR(S) || (Flags & 2))Applied=1;
+  /* r5.26.4 (HW 24.11.: the quiet table survived a hard power-off AND a GameOS start - GameOS does not put its own table
+   * back, so after a crash or a hold-15 s power-off nobody knew the original): the GameOS table is kept in
+   * \PSWloader\fan-gameos.bin on the ESP the first time it is seen; a later start that finds the quiet table takes it
+   * from there, so ps5pwr can still restore it at shutdown. */
+  if((Flags & 2) && Esp) {
+    EFI_FILE_PROTOCOL *Root=Ps5PresetRoot(Esp),*F=NULL;UINTN N=sizeof(Original);
+    if(Root && !EFI_ERROR(Root->Open(Root,&F,L"\\PSWloader\\fan-gameos.bin",EFI_FILE_MODE_READ,0))) {
+      if(!EFI_ERROR(F->Read(F,&N,Original)) && N==sizeof(Original) && !ps5_fq_is_quiet(Original))Flags|=0x101;   /* 0x100: from the ESP */
+      F->Close(F);
+    }
+    if(Root)Root->Close(Root);
+  } else if((Flags & 1) && Esp) {
+    EFI_FILE_PROTOCOL *Root=Ps5PresetRoot(Esp),*F=NULL,*D=NULL;STATIC UINT8 Have[0x6ae];UINTN N=sizeof(Have);BOOLEAN Same=FALSE;
+    if(Root && !EFI_ERROR(Root->Open(Root,&F,L"\\PSWloader\\fan-gameos.bin",EFI_FILE_MODE_READ,0))) {
+      Same=!EFI_ERROR(F->Read(F,&N,Have)) && N==sizeof(Have) && CompareMem(Have,Original,sizeof(Have))==0;F->Close(F);F=NULL; }
+    if(Root && !Same) {
+      if(!EFI_ERROR(Root->Open(Root,&D,L"\\PSWloader",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,EFI_FILE_DIRECTORY)))D->Close(D);
+      Ps5SetDelete(Root,L"\\PSWloader\\fan-gameos.bin");
+      if(!EFI_ERROR(Root->Open(Root,&F,L"\\PSWloader\\fan-gameos.bin",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,0))) {
+        N=sizeof(Original);EFI_STATUS W=F->Write(F,&N,Original);F->Flush(F);F->Close(F);
+        DEBUG((DEBUG_ERROR,"PS5 fan: GameOS table kept on the ESP: %r\n",W)); }
+    }
+    if(Root)Root->Close(Root);
+  }
+  if(Flags & 1) {
+    STATIC EFI_GUID PswGuid={0x5efc5ae0,0xb753,0x4f7a,{0xa6,0x62,0xe3,0x4d,0x15,0xa6,0xd8,0xe5}};   /* ps5pwr g_hp_guid */
+    EFI_STATUS V=gRT->SetVariable(L"PswFanOriginal",&PswGuid,EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Original),Original);
+    DEBUG((DEBUG_ERROR,"PS5 fan: PswFanOriginal published (%a): %r\n",(Flags & 0x100)?"from the ESP":"snapshot",V));
+  }
+  DEBUG((DEBUG_ERROR,"PS5 fan: %a: quiet backup table %r (flags %x, MainSoC %d mC, duty %u.%u%% -> %u.%u%%)\n",When,S,Flags,T,
+    D0<=1024?D0*100/1024:0,D0<=1024?(D0*1000/1024)%10:0,D1<=1024?D1*100/1024:0,D1<=1024?(D1*1000/1024)%10:0));
 }
 STATIC VOID Ps5InstallPStateSsdt(VOID) {
   STATIC BOOLEAN Done=FALSE; STATIC UINT8 Aml[4096];
@@ -1308,7 +1345,7 @@ STATIC EFI_STATUS Ps5LaunchWindows(EFI_HANDLE Selected)
   Ps5LabSanDiskDefault(Selected);
 #endif
   Ps5BcdTestsign(Selected,"before bootmgr");                     /* r5.22: testsigning for our boot drivers */
-  Ps5ApplyFanTarget("before bootmgr");                           /* r5.14: only if the menu changed the preset */
+  Ps5ApplyFanTarget("before bootmgr",mPs5ConfigEsp?mPs5ConfigEsp:Selected);                           /* r5.14: only if the menu changed the preset */
 #ifdef PS5_NATIVE_DP_VIDEO
   Ps5FrameRateLog("before bootmgr");                             /* r5.14: OTG frame counter since the mode start */
 #endif
@@ -1792,6 +1829,50 @@ STATIC VOID Ps5PublishBootDevs(VOID)
 #endif
 }
 
+#ifdef PS5_NATIVE_SETUP
+/* r5.26.6 (user 25.11.: existing Windows on a USB SSD + a freshly written NTFS installer drive; after the "restart" the
+ * installer drive asks for, "Boot once from ..." in the Boot Manager started Windows Setup without keyboard, mouse and
+ * installer drive - Setup asked for a driver): a start from the EDK2 Boot Manager skipped the port power cycle of the
+ * normal boot path, so the USB devices kept the state the previous Windows (here: Windows Setup) left - the firmware
+ * can still use them, Windows cannot (r5.25.11, r5.25.14). EfiBootManagerBoot (BmBoot.c, ps5_boot_manager.py) calls
+ * this hook before ReadyToBoot, at the caller's TPL: if no full cycle ran in this start (and usbpowercycle is on), the
+ * ports are cycled as in the boot path, the chosen drive stays powered, and the start waits up to 60 s for it. */
+#define PS5_PRE_BOOT_GUID {0x96d4b2b8,0xc972,0x487b,{0x85,0x84,0x7a,0x2e,0x2c,0xe0,0x89,0x7b}}
+typedef struct { UINT32 Revision; VOID (EFIAPI *PreBoot)(EFI_DEVICE_PATH_PROTOCOL *FilePath); } PS5_PRE_BOOT_PROTOCOL;
+STATIC EFI_GUID mPs5PreBootGuid=PS5_PRE_BOOT_GUID;
+STATIC UINT32 Ps5VolumeDiskPresent(UINT32 Want)
+{
+  EFI_HANDLE *H=NULL; UINTN N=0; UINT32 Found=0;
+  if (EFI_ERROR(gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleFileSystemProtocolGuid,NULL,&N,&H))) return 0;
+  for (UINTN I=0; I<N && !Found; I++) if (Ps5DiskId(Ps5DiskOf(H[I]))==Want) Found=1;
+  if (H!=NULL) FreePool(H);
+  return Found;
+}
+STATIC VOID EFIAPI Ps5PreBootCycle(EFI_DEVICE_PATH_PROTOCOL *FilePath)
+{
+  UINT32 Uc=1; UINTN Us=sizeof(Uc);
+  if (mPs5FullCycleRan || FilePath==NULL) return;
+  if (!EFI_ERROR(gRT->GetVariable(L"Ps5UsbCycle",&mPs5PresetGuid,NULL,&Us,&Uc)) && Us==sizeof(Uc) && !Uc) return;
+  EfiBootManagerConnectDevicePath(FilePath,NULL);
+  EFI_DEVICE_PATH_PROTOCOL *Dp=FilePath; EFI_HANDLE H=NULL;
+  if (EFI_ERROR(gBS->LocateDevicePath(&gEfiSimpleFileSystemProtocolGuid,&Dp,&H))) H=NULL;
+  UINT32 Want=H!=NULL?Ps5DiskId(Ps5DiskOf(H)):0;
+  DEBUG((DEBUG_ERROR,"PS5 pre-boot: start from the Boot Manager without a port power cycle - cycling now (chosen disk %08x)\n",Want));
+  if (mPs5UsbMassStopHandle!=NULL && !EFI_ERROR(gBS->UninstallProtocolInterface(mPs5UsbMassStopHandle,&mPs5UsbMassStopGuid,NULL)))
+    mPs5UsbMassStopHandle=NULL;   /* as in the boot path: never a USB-MSD stop marker across the controller restart */
+  mRecoverSilent=TRUE; Ps5UsbRecover(TRUE,H); mRecoverSilent=FALSE;
+  EfiBootManagerConnectAll();
+  if (Want==0) return;
+  for (UINTN A=0; A<PS5_WARM_USB_WAIT_ATTEMPTS; A++) {
+    if (Ps5VolumeDiskPresent(Want)) { DEBUG((DEBUG_ERROR,"PS5 pre-boot: chosen disk %08x back after %u.%u s\n",Want,(UINT32)(A/10),(UINT32)(A%10))); return; }
+    if (A%20==10) EfiBootManagerConnectAll();
+    gBS->Stall(100000);
+  }
+  DEBUG((DEBUG_ERROR,"PS5 pre-boot: chosen disk %08x not back after 60 s\n",Want));
+}
+STATIC PS5_PRE_BOOT_PROTOCOL mPs5PreBoot={1,Ps5PreBootCycle};
+#endif
+
 EFI_STATUS Ps5BootPinnedWindows (VOID)
 {
   { STATIC BOOLEAN Registered=FALSE;   /* r5.21: readable boot option names */
@@ -1801,6 +1882,9 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
       EFI_EVENT Rtb=NULL;   /* r5.22: testsigning for boots from the boot menu */
       EFI_STATUS Rh=EfiCreateEventReadyToBootEx(TPL_CALLBACK,Ps5BcdReadyToBoot,NULL,&Rtb);
       DEBUG((DEBUG_ERROR,"PS5 BCD testsigning: ReadyToBoot hook %r\n",Rh));(VOID)Rh;
+      { EFI_HANDLE Ph=NULL;   /* r5.26.6: USB power cycle for starts from the Boot Manager */
+        EFI_STATUS Pp=gBS->InstallMultipleProtocolInterfaces(&Ph,&mPs5PreBootGuid,&mPs5PreBoot,NULL);
+        DEBUG((DEBUG_ERROR,"PS5 pre-boot hook %r\n",Pp));(VOID)Pp; }
 #endif
     } }
   Ps5WarmReadRecord();   /* r5.25.4 */
@@ -2090,7 +2174,7 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
       EfiBootManagerRefreshAllBootOption();
       Ps5PowerPresetLoad(mPs5ConfigEsp?mPs5ConfigEsp:Selected);   /* r5.7: \PS5UEFI.CFG -> PlatformLang, Ps5PowerPreset before the menu;
                                                        r5.15.2: always the internal config ESP, also when USB boots */
-      Ps5ApplyFanTarget("settings loaded");            /* r5.14: fan target from the preset, before the menu */
+      Ps5ApplyFanTarget("settings loaded",mPs5ConfigEsp?mPs5ConfigEsp:Selected);            /* r5.14: fan target from the preset, before the menu */
       { /* r5.11 (16.11., telemetry plan step 1): read-only P-state MSRs of the BSP (AMD family 17h, architectural):
          * PStateCurLim C0010061, PStateCtl C0010062, PStateStat C0010063, PStateDef0..7 C0010064..6B, HwPstateStatus C0010293.
          * Basis for an ACPI _PSS with exactly the P-states the PS5 defines (Zen: MHz = FID*25*8/DID for enabled defs, bit 63). */
@@ -2176,7 +2260,7 @@ EFI_STATUS Ps5BootPinnedWindows (VOID)
       DEBUG((DEBUG_ERROR,"PS5 Windows boot: no bootx64.efi medium after 13 s - opening UEFI Boot Manager\n"));
       EfiBootManagerRefreshAllBootOption();
       Ps5PowerPresetLoad(mPs5ConfigEsp);
-      Ps5ApplyFanTarget("no medium setup");
+      Ps5ApplyFanTarget("no medium setup",mPs5ConfigEsp);
       mPs5BootSelected=NULL;
       mPs5MenuBootNow=Ps5BootNow;
       { STATIC EFI_HANDLE NoMedBootNow=NULL;

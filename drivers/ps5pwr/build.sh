@@ -17,7 +17,7 @@ mkdir -p "$OUT"
 EP=${PS5PWR_EPOCH:-}
 OBJS=""
 for f in "$D/ps5pwr.c" "$D/ps5pwr-sensors.c" "$D/smu-mbox.c" "$D/../../firmware/icc-power.c" "$D/ps5pwr-hotplug.c" "$D/../../firmware/icc-hdmi.c" "$D/../../firmware/hdmi-commands.c" \
-         "$D/../../firmware/flava3-prepare.c" "$D/../../firmware/flava3-video.c" "$D/../../firmware/ps5-display-mode.c" "$D/../../firmware/button-keys.c"; do
+         "$D/../../firmware/flava3-prepare.c" "$D/../../firmware/flava3-video.c" "$D/../../firmware/ps5-display-mode.c" "$D/../../firmware/button-keys.c" "$D/ps5pwr-fancurve.c"; do
 OBJS="$OBJS $OUT/$(basename "$f" .c).obj"
 clang --target=x86_64-pc-windows-msvc -c -O2 -Wall -Werror -Wno-unused-function -Wno-microsoft-anon-tag \
   -fms-extensions -fms-compatibility -fno-stack-protector -mno-red-zone -mcmodel=small -ffreestanding -fno-builtin \

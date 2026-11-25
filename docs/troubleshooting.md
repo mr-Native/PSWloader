@@ -1,25 +1,47 @@
 # Troubleshooting & Logs
 
-## Log locations
+## Reporting a problem
 
-If something fails during installation, boot, or updating, grab the relevant log before opening an issue:
+Please open an issue and attach the logs that fit your case:
 
-- **UEFI diagnostics:** `\PS5DIAG.LOG` on the EFI System Partition (generated via *UEFI Menu → Diagnostics → Run system check*).
-- **Initial setup logs:** `C:\PSWSetup\logs\setup_psw*.log` and `C:\Windows\Setup\Scripts\psw-specialize.log`.
-- **Updater logs:** `C:\PSWSetup\Update\PSWUpdate-*.log` and `C:\PSWSetup\Update\PSWUpdateCheck.log`.
+- **Windows reaches the desktop:** run `C:\PSWloader\selfcheck\PSWSelfCheck.cmd`. It collects every log into one zip in
+  `C:\PSWloader\selfcheck\results`; attach that zip. It answers most questions at once. See [selfcheck.md](selfcheck.md).
+- **Windows does not start:** run the firmware's system check. Press `ESC` on the PSWloader Boot Manager screen, open
+  *Diagnostics → Run system check*, and attach the file it writes, `\PSWloader\logs\PS5DIAG.LOG`. It goes to a FAT32 USB
+  drive if one is plugged in, otherwise to the EFI partition of the Windows drive.
+- **The console goes back to GameOS before the PSWloader screen:** attach `pswloader-elf.log` from `/data/pswloader/` on
+  the console (or from `PSW\` on the USB installer drive).
+- **Windows Setup shows no disks:** attach the folder `PSW\logs` from the USB installer drive (one log per Setup start).
+
+**System software other than 13.60:** PSWloader is built to run on the same versions as PS5 Linux (3.00 to 13.60,
+Phat and Slim), but only 13.60 is tested. If you use another version, please report in an issue whether it works, with
+the logs above, even when everything works.
+
+## Known issues
+
+### Windows Setup shows "Install driver to show hardware" (no keyboard and mouse)
+If Windows Setup asks for a driver and keyboard and mouse do not work, do one **cold restart**: switch the console off,
+start `PSWloader.elf` again from GameOS and pick the USB installer drive with `DEL` on the PSWloader screen.
+
+This only happens when a Windows installation already existed (the firmware found it) and Windows Setup was started
+through *Boot once from ...* in the Boot Manager, usually after the restart an NTFS USB installer drive asks for.
 
 ## Common issues
 
-### No disks listed in Windows Setup (NTFS USB stick)
-If your flashing tool formatted the Windows installer USB stick as NTFS instead of FAT32, the first boot enables test-signing in the stick's BCD. Restart once back into `PSWloader.elf` and boot the USB stick again — your target drives will appear.
+### No disks listed in Windows Setup
+The PS5 storage drivers in Windows Setup need test signing in the boot entry of the USB installer drive. On a FAT32
+drive PSWloader sets it by itself. On an NTFS drive (Rufus) the black PSWloader window in Setup sets it and asks you to
+close Setup once; the disks show after that restart. A drive written as a read-only image (for example Etcher with the
+ISO as is) cannot be changed: write it again with Rufus (FAT32 or NTFS) and extract `pswloader-v*-Install-Files.zip`
+onto it. Windows cannot be installed onto the drive that holds the installer: you need a second drive (or the Windows
+To Go path in the README). If the disks are still missing, see *Reporting a problem* above.
 
-### Wi-Fi adapter installed, but no networks shown
-1. Make sure you booted at least once with the matching `PSWloader.elf` (v1.0.3 or newer) so `\PS5WIFIFW.BIN` is extracted from your console.
-2. Check Device Manager → *Network adapters* → **PS5 Wi-Fi 6 Adapter (ps5wifi)** to confirm there is no yellow warning icon.
-3. If your console has an unknown network controller instead, check its Hardware ID in Device Manager (`Details → Hardware Ids`).
+### Windows stays on "Just a moment..." for a long time
+Before the first sign-in PSWloader installs the PS5 drivers. This usually takes 5–10 minutes. After 20 minutes it is
+stopped, and Windows continues to the sign-in. If the installation fails or is stopped, a support zip is written to
+`C:\PSWloader\selfcheck\results` and a notice at the first sign-in shows where it is. Attach that zip to an issue.
+Logs: `C:\PSWSetup\logs` and `C:\Windows\Setup\Scripts\psw-setupcomplete.log`.
 
-### Windows Setup asks for a network or Microsoft account
-Starting with v1.0.3, both Ethernet and Wi-Fi drivers are installed before the Windows 11 OOBE screen, and `BypassNRO` is enabled automatically so you can also select **I don't have internet** for a local account.
-
-### Windows Update broke a driver after an OS update
-PSWloader sets `ExcludeWUDriversInQualityUpdate = 1` to keep Windows Update from overwriting PS5 drivers. If a major Windows update resets something, simply re-run the latest `PSWUpdater-vX.Y.Z.exe` to repair all drivers and BCD flags.
+### Windows Update broke a driver
+PSWloader keeps Windows Update from replacing PS5 drivers. If a big Windows update resets something, run the latest
+`PSWUpdater-vX.Y.exe` again to repair drivers and boot settings.

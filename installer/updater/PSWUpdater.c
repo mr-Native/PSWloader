@@ -1,7 +1,8 @@
 /* PSWUpdater.c - version-independent updater launcher for PSWloader Windows 11 installations.
  * Reads installed version (C:\ProgramData\PSWloader\version.json) and package metadata
  * (<dir>\payload\version.json), confirms the upgrade, warns if PSWloader.elf also needs
- * updating, runs <dir>\engine\PSWUpdate.ps1 elevated, and prompts to restart Windows. */
+ * updating, runs <dir>\engine\PSWUpdate.ps1 elevated, and prompts to restart Windows.
+ * v1.1: blocks a downgrade (package older than the installed version) with a notice, exit code 3. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +63,40 @@ static int json_get_bool(const char *json, const char *key)
     p++;
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     return strncmp(p, "true", 4) == 0;
+}
+
+/* v1.1: version order for the downgrade block - "v1.0.4" < "v1.0.5-beta" < "v1.0.5" < "v1.1"; numbers first, a release
+ * ranks above its own pre-releases. Returns -1/0/1, or 2 when one side is not a version (then nothing is blocked). */
+static int parse_ver(const wchar_t *s, long n[4], const wchar_t **pre)
+{
+    int i = 0;
+    n[0] = n[1] = n[2] = n[3] = 0; *pre = NULL;
+    while (*s == L' ') s++;
+    if (*s == L'v' || *s == L'V') s++;
+    if (*s < L'0' || *s > L'9') return 0;
+    for (;;) {
+        long v = 0;
+        if (*s < L'0' || *s > L'9') return 0;
+        while (*s >= L'0' && *s <= L'9') v = v * 10 + (*s++ - L'0');
+        if (i < 4) n[i++] = v;
+        if (*s == L'.') { s++; continue; }
+        break;
+    }
+    if (*s == L'-' && s[1]) { *pre = s + 1; return 1; }
+    while (*s == L' ') s++;
+    return *s == 0;
+}
+
+static int ver_cmp(const wchar_t *a, const wchar_t *b)
+{
+    long x[4], y[4]; const wchar_t *pa, *pb;
+    if (!parse_ver(a, x, &pa) || !parse_ver(b, y, &pb)) return 2;
+    for (int i = 0; i < 4; i++) if (x[i] != y[i]) return x[i] < y[i] ? -1 : 1;
+    if (!pa && !pb) return 0;
+    if (!pa) return 1;
+    if (!pb) return -1;
+    int c = wcscmp(pa, pb);
+    return c < 0 ? -1 : (c > 0 ? 1 : 0);
 }
 
 static void read_last_result(wchar_t *status, size_t status_cap,
@@ -145,6 +180,20 @@ int wmain(int argc, wchar_t **argv)
 
     wchar_t title[128];
     swprintf(title, 128, L"PSWloader Updater (%ls)", target_ver);
+
+    /* v1.1: never downgrade - an older updater would put older drivers, scripts and firmware files on a newer install */
+    if (cur_ver[0] && ver_cmp(target_ver, cur_ver) == -1) {
+        if (!quiet) {
+            wchar_t msg[1024];
+            swprintf(msg, 1024,
+                L"PSWloader %ls is installed on this PC.\n\n"
+                L"This updater is for the older version %ls. A downgrade is not supported, nothing was changed.\n\n"
+                L"Please download the current updater from:\nhttps://github.com/mr-Native/PSWloader/releases",
+                cur_ver, target_ver);
+            MessageBoxW(NULL, msg, title, MB_OK | MB_ICONWARNING);
+        }
+        return 3;
+    }
 
     if (!quiet) {
         wchar_t prompt[1024];

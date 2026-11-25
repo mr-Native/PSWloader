@@ -144,6 +144,9 @@ void ps5_bootstrap_main(const uint8_t *bp) {
         }
     }
 #endif
+#ifdef PS5_EMBED_ACPI
+    uint64_t pci_input_bytes = result.hob_bytes;   /* r5.26.7: prepared_hobs stays the PCI input until the ACPI step */
+#endif
     status = ps5_add_pci_handoff(prepared_hobs, (size_t)result.hob_bytes,
                                   sony, amd, sizeof(sony), pci_hobs, sizeof(pci_hobs), &result);
 #ifdef PS5_POWER_TELEMETRY
@@ -160,11 +163,20 @@ void ps5_bootstrap_main(const uint8_t *bp) {
     if (status) stop(0x500U + (uint32_t)(-status));
     const uint8_t *final_hobs = pci_hobs;
 #ifdef PS5_EMBED_ACPI
+    /* r5.26.7 (version independence): the DSDT PCI0 windows follow the root ports, like the HOB apertures above */
+    static uint8_t acpi_arena[sizeof(acpi_image)];
+    for (size_t i = 0; i < sizeof(acpi_image); i++) acpi_arena[i] = acpi_image[i];
+    {
+        struct ps5_pci_windows win;
+        if (ps5_pci_handoff_windows(prepared_hobs, (size_t)pci_input_bytes, sony, amd, sizeof(sony), &win) != 0) stop(0x608U);
+        status = ps5_acpi_set_pci_windows(acpi_arena, sizeof(acpi_arena), win.cut);
+        if (status) stop(0x610U + (uint32_t)(-status));
+    }
     status = ps5_add_acpi_handoff(pci_hobs, (size_t)result.hob_bytes,
-                                   acpi_image, sizeof(acpi_image), prepared_hobs,
+                                   acpi_arena, sizeof(acpi_arena), prepared_hobs,
                                    sizeof(prepared_hobs), &result);
     if (status) stop(0x600U + (uint32_t)(-status));
-    physical_copy(PS5_ACPI_BASE, acpi_image, sizeof(acpi_image));
+    physical_copy(PS5_ACPI_BASE, acpi_arena, sizeof(acpi_arena));
 #ifdef PS5_IOAPIC_SCRATCH
     /* Clear the dedicated EfiReserved IO-APIC scratch page that acpi-handoff carved out right after the
      * arena. Defensive: the HAL writes 0 to IOWIN before it reads, so the version read is 0 regardless,

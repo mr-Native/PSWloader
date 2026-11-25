@@ -1,4 +1,4 @@
-# PSWSetup.ps1 v0.5.8 (v0.5.8: VC_redist gets at most 3 minutes - in SetupComplete it never returned and the Windows setup screens never came; v0.5.7: SelfCheck also installs PSWWatch.ps1 + task 'PSWloader Watch' (background log C:\PSWloader\logs\watch); v0.5.6: component SelfCheck - the support tool in C:\PSWloader\selfcheck; v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
+# PSWSetup.ps1 v0.5.13 (v0.5.13: before the first sign-in (-FromSetupComplete) VC_redist is no longer run - it still held "Just a moment..." with v0.5.12 (user 25.11.); task PSW-VCRedist installs it after the first sign-in in the background, the three DLLs the GPU driver needs are copied at once as before; v0.5.12: VC_redist is started directly (CreateProcess) instead of through the Windows shell - in SetupComplete the shell start never returned, so the 3-minute limit never began and "Just a moment..." stayed for 20+ minutes (user install 25.11.); the payload loses any downloaded-file mark (Zone.Identifier) first; v0.5.11: edition line also hidden by a SYSTEM task from system start (PSW-HideEditionSys); v0.5.10: Watermark also hides the edition line ("Windows 11 Pro") - task PSW-HideEdition at every sign-in as the user; v0.5.9: memory integrity (HVCI/VBS) off - issue #8 Code 39 on every PS5 driver; the x64 VC runtime DLLs the GPU user-mode driver needs go to System32 even when VC_redist hangs - black screen 0x889800B2; v0.5.8: VC_redist gets at most 3 minutes - in SetupComplete it never returned and the Windows setup screens never came; v0.5.7: SelfCheck also installs PSWWatch.ps1 + task 'PSWloader Watch' (background log C:\PSWloader\logs\watch); v0.5.6: component SelfCheck - the support tool in C:\PSWloader\selfcheck; v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
 #   DefaultsV2 value that differs from its compiled factory value (0xC0000182, Code 37), so a fresh install never got a first
 #   driver start; mode 0 comes from the generation override written by ps5-postboot.ps1; v0.5.4: PowerPlan also turns off USB selective suspend and USB 3 link power management (U1/U2) - HW 18.11.:
 #   with selective suspend on, an idle USB SSD (RTL9210B, UAS) on the AMD xHCI does not come back (events 129/153, no more I/O);
@@ -35,7 +35,7 @@ param([ValidateSet('Detect', 'Install', 'Uninstall')][string]$Mode = 'Detect', [
       [string]$Root = '', [string]$Data = "$env:ProgramData\PSWloader")
 $ErrorActionPreference = 'Stop'
 if (-not $Root) { $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }   # v0.4: $PSScriptRoot is empty in param defaults on Windows PowerShell 5.1
-$SetupVersion = '0.5.8'
+$SetupVersion = '0.5.13'
 if ($Version) { "PSWloader Setup $SetupVersion"; return }
 # v0.5.0: data of an older setup (C:\ProgramData\PS5Setup: journal, logs) moves to the PSWloader folder once
 $OldData = "$env:ProgramData\PS5Setup"
@@ -149,6 +149,15 @@ function Test-PayloadFile($f) {   # manifest entry {path, sha256} -> full path, 
   return $p
 }
 function Test-FileHashIs([string]$Path, [string]$Sha) { (Test-Path -LiteralPath $Path) -and (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ieq $Sha }
+# v0.5.9: the x64 VC runtime DLLs of the shipped redistributable straight to System32 (only missing or older files) - the GPU
+# user-mode driver needs them; called before the GPU driver and again after VC_redist
+function Install-VcRuntimeDlls {
+  foreach ($f in @(Get-PayloadFiles VCRedist | Where-Object { $_.path -like 'vcruntime/x64/*' })) {
+    $src = Test-PayloadFile $f; $dst = Join-Path "$env:SystemRoot\System32" (Split-Path -Leaf $f.path)
+    $new = (Get-Item $src).VersionInfo.FileVersionRaw
+    $old = if (Test-Path $dst) { (Get-Item $dst).VersionInfo.FileVersionRaw } else { $null }
+    if ((-not $old -or $old -lt $new) -and $PSCmdlet.ShouldProcess($dst, "copy $new")) {
+      Copy-Item -Path $src -Destination $dst -Force; Log "  $(Split-Path -Leaf $dst) $new -> System32 (was $(if ($old) { $old } else { 'missing' }))" } } }
 function Install-PayloadFile([string]$Component, [string]$Rel, [string]$Dst) {   # copy with hash check; a loaded image is renamed first
   $f = Get-PayloadEntry $Rel; if (-not $f) { throw "manifest has no $Rel" }
   if (Test-FileHashIs $Dst $f.sha256) { return $false }
@@ -166,8 +175,8 @@ function Get-ServiceImageFile([string]$Service) {
   if ($ip -match '^(?i)system32\\') { $ip = Join-Path $env:SystemRoot $ip }
   return $ip
 }
-function Register-Task([string]$Component, [string]$Name, $Action, $Trigger, $Settings) {
-  $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+function Register-Task([string]$Component, [string]$Name, $Action, $Trigger, $Settings, $Principal) {
+  $p = if ($Principal) { $Principal } else { New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest }
   $existed = [bool](Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue)
   if ($PSCmdlet.ShouldProcess($Name, 'register task')) {
     Register-ScheduledTask -TaskName $Name -Action $Action -Trigger $Trigger -Principal $p -Settings $Settings -Force | Out-Null
@@ -355,7 +364,8 @@ $Comp.Boot = @{ Default = $true; Phase = 1   # BCD as on the reference install; 
   Detect = { [ordered]@{ TestSigning = ((Get-BcdCurrentElement '16000049') -join ',') -eq '1'
                          NoDynamicTick = ((Get-BcdCurrentElement '260000a5') -join ',') -eq '1'
                          IgnoreAllFailures = (($b = Get-BcdCurrentElement '250000e0') -and $b[0] -eq 1)
-                         TestModeActive = Test-TestModeActive } }
+                         TestModeActive = Test-TestModeActive
+                         HvciOff = (Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' 'Enabled') -ne 1 } }
   Install = {
     foreach ($s in @(@('testsigning', 'on', '16000049'), @('disabledynamictick', 'yes', '260000a5'), @('bootstatuspolicy', 'IgnoreAllFailures', '250000e0'))) {
       $old = Get-BcdCurrentElement $s[2]
@@ -364,6 +374,11 @@ $Comp.Boot = @{ Default = $true; Phase = 1   # BCD as on the reference install; 
         $r = Invoke-Tool bcdedit.exe @('/set', '{current}', $s[0], $s[1]); if ($r[0] -ne 0) { throw "bcdedit /set $($s[0]) failed: $($r[1])" }
         Add-Journal ([ordered]@{ c = 'Boot'; t = 'bcd'; id = '{current}'; name = $s[0]; old = $(if ($null -eq $old) { 'absent' } else { $old -join ',' }) })
         $script:RebootNeeded = $true } }
+    # v0.5.9 (issue #8: Code 39 on GPU, LAN and Wi-Fi after PSWSetup): memory integrity (HVCI) and VBS off - Windows 11
+    # turns them on by itself on fresh installs, and the PS5 kernel drivers (test-signed, executable pool) cannot load then
+    $dg = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
+    if (Set-RegValue Boot "$dg\Scenarios\HypervisorEnforcedCodeIntegrity" 'Enabled' 0 DWord) { $script:RebootNeeded = $true }
+    if (Set-RegValue Boot $dg 'EnableVirtualizationBasedSecurity' 0 DWord) { $script:RebootNeeded = $true }
   }
 }
 $Comp.Gpu = @{ Default = $true; Phase = 2   # bc250kmd v10.14 (release set v1.0, ps5gpu.inf + shipped catalog, VBIOS in System32\drivers), EnableDisplayModes=0 via generation override (ps5-postboot)
@@ -372,6 +387,7 @@ $Comp.Gpu = @{ Default = $true; Phase = 2   # bc250kmd v10.14 (release set v1.0,
                          DesktopRouter = (Get-RegValue 'HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter' 'DwmForceCpu') -eq 0
                          TdrDelay10 = (Get-RegValue "$CS\Control\GraphicsDrivers" 'TdrDelay') -eq 10 } }
   Install = {
+    Install-VcRuntimeDlls   # v0.5.9: before the driver - without them DWM crash-loops (0x889800B2) until VC_redist ran
     if (-not (& $Comp.Gpu.Detect).KmdCurrent -or $Force) {
       $vb = Find-EspVbios
       if (-not $vb) { throw 'VBIOS not found: the firmware writes \PS5VBIOS.BIN to the boot ESP at every start. Boot once with PSWloader and run the setup again.' }
@@ -549,15 +565,17 @@ $Comp.PowerPlan = @{ Default = $true; Phase = 2   # never sleep / screen off, hi
 $Comp.Thermal = @{ Default = $true; Phase = 2   # ThermalManager v1.6.7 (BAPM init + boost window in standard/oc, temperature-led fan), guard v18.3 (file name kept: thermal-guard-v17.ps1), supervisor v1.2, fan target task
   Detect = { $r = [ordered]@{}
     foreach ($f in Get-PayloadFiles Thermal) { $r[(Split-Path -Leaf $f.path)] = Test-FileHashIs "C:\ps5-work\$(Split-Path -Leaf $f.path)" $f.sha256 }
-    foreach ($t in 'PSW-FanTarget', 'PSW-ThermalManager', 'PSW-ThermalGuard') { $r[$t] = [bool](Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) }
+    foreach ($t in 'PSW-ThermalManager', 'PSW-ThermalGuard') { $r[$t] = [bool](Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) }
+    $r['NoFanTargetTask'] = -not (Get-ScheduledTask -TaskName 'PSW-FanTarget' -ErrorAction SilentlyContinue)   # v0.5.9
     $r }
   Install = {
     foreach ($f in Get-PayloadFiles Thermal) { Install-PayloadFile Thermal $f.path "C:\ps5-work\$(Split-Path -Leaf $f.path)" | Out-Null }
     $ps = 'powershell.exe'; $sx = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     $t = New-ScheduledTaskTrigger -AtStartup
     foreach ($o in 'PS5-FanTarget-60C', 'PS5-ThermalManager', 'PS5-TimeSpy-ThermalGuard-v17') { Remove-LegacyTask $o }
-    Register-Task Thermal 'PSW-FanTarget' (New-ScheduledTaskAction -Execute 'C:\ps5-work\fan-target-startup-fast.exe') $t `
-      (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 4) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)
+    # v0.5.9: no PSW-FanTarget task any more - ps5pwr 1.17+ runs the PS5 Linux fan curve itself, a fixed 60 C target at
+    # every start only fought it (the driver refuses it while the curve runs)
+    Remove-LegacyTask 'PSW-FanTarget'
     $t = New-ScheduledTaskTrigger -AtLogOn; $t.Delay = 'PT120S'
     Register-Task Thermal 'PSW-ThermalManager' (New-ScheduledTaskAction -Execute $ps -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\ps5-work\ps5-thermal-manager.ps1 -OcMaxMhz 2230') $t $sx
     Register-Task Thermal 'PSW-ThermalGuard' (New-ScheduledTaskAction -Execute $ps -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\ps5-work\thermal-supervisor.ps1') (New-ScheduledTaskTrigger -AtStartup) $sx
@@ -581,8 +599,48 @@ $Comp.VCRedist = @{ Default = $true; Phase = 2   # v0.5.0: Microsoft Visual C++ 
       $k = if ($a -eq 'x86') { 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86' } else { 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64' }
       $have = $null; try { $have = [version]("$(Get-RegValue $k 'Version')".TrimStart('v')) } catch { }
       $r[$a] = ((Get-RegValue $k 'Installed') -eq 1) -and $have -and $have -ge $want }
+    # v0.5.13: a pending install by task PSW-VCRedist (after the first sign-in) counts as done
+    if ([bool](Get-ScheduledTask -TaskName 'PSW-VCRedist' -ErrorAction SilentlyContinue)) { $r['x64'] = $true; $r['x86'] = $true }
     $r }
   Install = {
+    if ($FromSetupComplete) {
+      # v0.5.13 (user 25.11.: with v0.5.12 the console still sat on "Just a moment..." too long): before the first sign-in no
+      # installer runs at all. The redistributables go to C:\ProgramData\PSWloader\vcredist and task PSW-VCRedist (SYSTEM, at
+      # sign-in + 1 minute) installs them in the background, each at most 10 minutes, and removes itself when both are in.
+      # The DLLs the GPU user-mode driver needs are copied now (Install-VcRuntimeDlls), so the desktop does not wait for it.
+      $dir = "$Data\vcredist"
+      if ($PSCmdlet.ShouldProcess($dir, 'stage VC_redist for task PSW-VCRedist')) {
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        foreach ($a in 'x64', 'x86') {
+          if ((& $Comp.VCRedist.Detect)[$a]) { continue }
+          Copy-Item -LiteralPath (Test-PayloadFile (Get-PayloadEntry "vcredist/VC_redist.$a.exe")) -Destination "$dir\VC_redist.$a.exe" -Force }
+        Set-Content -LiteralPath "$dir\psw-vcredist.ps1" -Encoding ASCII -Value @'
+# psw-vcredist.ps1 (PSWSetup 0.5.13) - task PSW-VCRedist: installs the Visual C++ runtime after the first sign-in
+$ErrorActionPreference = 'Continue'
+$d = Split-Path -Parent $MyInvocation.MyCommand.Path
+$log = 'C:\ProgramData\PSWloader\logs\vcredist.log'
+New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null
+function L([string]$m) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m" | Add-Content -Path $log }
+$ok = $true
+foreach ($a in 'x64', 'x86') {
+  $f = Join-Path $d "VC_redist.$a.exe"; if (-not (Test-Path $f)) { continue }
+  $psi = New-Object System.Diagnostics.ProcessStartInfo $f, '/install /quiet /norestart'
+  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+  $p = [System.Diagnostics.Process]::Start($psi)
+  if (-not $p.WaitForExit(600000)) { & taskkill.exe /PID $p.Id /T /F | Out-Null; L "VC_redist.$a.exe did not finish in 10 minutes - stopped, the next sign-in tries again"; $ok = $false; continue }
+  L "VC_redist.$a.exe exit $($p.ExitCode)"
+  if (@(0, 1638, 3010) -contains $p.ExitCode) { Remove-Item $f -Force -ErrorAction SilentlyContinue } else { $ok = $false }
+}
+if ($ok) { Unregister-ScheduledTask -TaskName 'PSW-VCRedist' -Confirm:$false -ErrorAction SilentlyContinue; L 'done - task PSW-VCRedist removed' }
+'@
+      }
+      $t = New-ScheduledTaskTrigger -AtLogOn; $t.Delay = 'PT1M'
+      Register-Task VCRedist 'PSW-VCRedist' (New-ScheduledTaskAction -Execute "$PSHOME\powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\psw-vcredist.ps1`"") $t `
+        (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)
+      Log "  VC_redist deferred: task PSW-VCRedist installs it after the first sign-in (log $Data\logs\vcredist.log)"
+      Install-VcRuntimeDlls
+      return
+    }
     foreach ($a in 'x64', 'x86') {
       if ((& $Comp.VCRedist.Detect)[$a]) { continue }
       $f = Test-PayloadFile (Get-PayloadEntry "vcredist/VC_redist.$a.exe")
@@ -590,7 +648,15 @@ $Comp.VCRedist = @{ Default = $true; Phase = 2   # v0.5.0: Microsoft Visual C++ 
         # v0.5.8 (HW 24.11.: in SetupComplete VC_redist.x64.exe never returned, so PSWSetup and with it SetupComplete never
         # ended and the Windows setup screens never came - black screen): at most 3 minutes, then the installer and its child
         # processes are ended and PSWSetup goes on; the runtime is not needed to start Windows.
-        $pr = Start-Process -FilePath $f -ArgumentList '/install', '/quiet', '/norestart' -PassThru
+        # v0.5.12 (user install 25.11.: the log ended at 'install VCRedist', no Windows Installer event followed, the console sat
+        # on "Just a moment..." until it was switched off): Start-Process without redirection goes through the Windows shell
+        # (ShellExecuteEx, with the downloaded-file check), and that call itself never returned in SetupComplete - the limit
+        # below never started. A direct CreateProcess start returns at once.
+        Unblock-File -LiteralPath $f -ErrorAction SilentlyContinue
+        $psi = New-Object System.Diagnostics.ProcessStartInfo $f, '/install /quiet /norestart'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $pr = [System.Diagnostics.Process]::Start($psi)
+        Log "  VC_redist.$a.exe started (pid $($pr.Id)), waiting at most 3 minutes"
         if (-not $pr.WaitForExit(180000)) {
           & taskkill.exe /PID $pr.Id /T /F 2>&1 | Out-Null
           LogWarn "VC_redist.$a.exe did not finish in 3 minutes - ended, Windows setup goes on (run the updater later to install it)"
@@ -599,12 +665,20 @@ $Comp.VCRedist = @{ Default = $true; Phase = 2   # v0.5.0: Microsoft Visual C++ 
         Log "  VC_redist.$a.exe exit $($pr.ExitCode)"
         if ($pr.ExitCode -eq 3010) { $script:RebootNeeded = $true }
         elseif ($pr.ExitCode -ne 0 -and $pr.ExitCode -ne 1638) { LogWarn "VC_redist.$a.exe exit $($pr.ExitCode)" } } }
+    # v0.5.9: the GPU user-mode driver (desktop\bc250d3d_router.dll, amdgpu_wddm_radv.dll, bc250d3d_zink.dll) needs msvcp140,
+    # vcruntime140 and vcruntime140_1. Without them DWM cannot create its D3D device (0x889800B2 MILERR_AMD_DEVICE_CREATION_FAILURE)
+    # and the screen stays black after the GPU driver - the case whenever VC_redist hangs and is ended above. The three x64 DLLs
+    # of the same redistributable go to System32 directly, only where missing or older.
+    Install-VcRuntimeDlls
     # no journal entry: the runtime is shared with other programs and stays installed on uninstall
   }
 }
 $Comp.Watermark = @{ Default = $true; Phase = 2   # v0.5.0: the test-mode text on the desktop is hidden (user choice), -Restore undoes it
   Detect = { [ordered]@{ Script = Test-FileHashIs "$env:ProgramData\PSWloader\psw-hide-testmode.ps1" (Get-PayloadEntry 'scripts/psw-hide-testmode.ps1').sha256
-                         Task = [bool](Get-ScheduledTask -TaskName 'PSW-HideTestMode' -ErrorAction SilentlyContinue) } }
+                         Task = [bool](Get-ScheduledTask -TaskName 'PSW-HideTestMode' -ErrorAction SilentlyContinue)
+                         EditionTask = [bool](Get-ScheduledTask -TaskName 'PSW-HideEdition' -ErrorAction SilentlyContinue)
+                         EditionSysTask = [bool](Get-ScheduledTask -TaskName 'PSW-HideEditionSys' -ErrorAction SilentlyContinue)
+                         EditionExe = Test-FileHashIs "$env:ProgramData\PSWloader\PSWEdition.exe" (Get-PayloadEntry 'scripts/PSWEdition.exe').sha256 } }
   Install = {
     $dst = "$env:ProgramData\PSWloader\psw-hide-testmode.ps1"
     Install-PayloadFile Watermark 'scripts/psw-hide-testmode.ps1' $dst | Out-Null
@@ -614,6 +688,20 @@ $Comp.Watermark = @{ Default = $true; Phase = 2   # v0.5.0: the test-mode text o
       $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dst 2>&1
       Log "  psw-hide-testmode: exit $LASTEXITCODE $(($o | Select-Object -Last 2) -join ' | ')"
       Add-Journal ([ordered]@{ c = 'Watermark'; t = 'script'; file = $dst; args = @('-Restore') }) }
+    # v0.5.10: the edition line ("Windows 11 Pro") - Explorer memory only, so it runs in every user's session at sign-in
+    # (Users group, no admin rights, no console window); it keeps watching for a restarted Explorer
+    Register-Task Watermark 'PSW-HideEdition' (New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" `
+      -Argument "--headless $env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dst`" -Edition") `
+      (New-ScheduledTaskTrigger -AtLogOn) (New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries) `
+      (New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited)
+    if ($PSCmdlet.ShouldProcess('PSW-HideEdition', 'start now')) { Start-ScheduledTask -TaskName 'PSW-HideEdition' -ErrorAction SilentlyContinue }
+    # v0.5.11: the same as SYSTEM from system start with the native PSWEdition.exe (PowerShell needed ~30 s to start during the
+    # boot; the exe clears the flag ~30 ms after Explorer starts, HW 24.11.)
+    $exe = "$env:ProgramData\PSWloader\PSWEdition.exe"
+    Install-PayloadFile Watermark 'scripts/PSWEdition.exe' $exe | Out-Null
+    Register-Task Watermark 'PSW-HideEditionSys' (New-ScheduledTaskAction -Execute $exe) `
+      (New-ScheduledTaskTrigger -AtStartup) (New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)
+    if ($PSCmdlet.ShouldProcess('PSW-HideEditionSys', 'start now')) { Start-ScheduledTask -TaskName 'PSW-HideEditionSys' -ErrorAction SilentlyContinue }
   }
 }
 $Comp.BootMenu = @{ Default = $true; Phase = 2   # v0.5.5 (user request): Start-menu entry "PSWloader UEFI Boot Manager" -> confirm -> shutdown /r /fw
@@ -779,6 +867,9 @@ try {
     'Detect' { foreach ($c in $sel) { $r = & $Comp[$c].Detect; $ok = -not ($r.Values -contains $false)
         Log ('{0,-10} {1,-8} {2}' -f $c, $(if ($ok) { 'ok' } else { 'missing' }), (($r.GetEnumerator() | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' ')) } }
     'Install' {
+      # v0.5.12: a stick filled from a downloaded zip carries the downloaded-file mark (Zone.Identifier) on every payload file;
+      # it is removed, so no Windows security prompt can wait invisibly before the first sign-in
+      Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
       if (-not $Resume -and $Root -ne "$Data\installer" -and $PSCmdlet.ShouldProcess("$Data\installer", 'copy setup for the resume after reboot')) {
         if (Test-Path "$Data\installer") { Remove-Item "$Data\installer" -Recurse -Force }
         New-Item -ItemType Directory -Force "$Data\installer" | Out-Null

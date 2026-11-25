@@ -21,6 +21,33 @@ function Write-Log([string]$Msg) {
     Add-Content -Path $LogPath -Value "[$ts] $Msg" -Encoding UTF8
 }
 
+# v1.1: outdated PSWloader.elf. A release older than PSWloader v1.0.5 cannot start the firmware the updater placed on the
+# EFI partition, so Windows then runs on the old firmware built into that ELF (restarts, drivers and fan control can
+# fail). Warned at every sign-in, also with update checks turned off: the running firmware revision (BIOS version
+# "PSWloader v1.1 (r5.26.1)"; no revision = before r5.25.13) is compared with minFirmware from version.json.
+function Get-FwRev([string]$s) {   # "r5.26.1" -> 5026001, $null without a revision
+    if ($s -match 'r(\d+)\.(\d+)\.(\d+)') { return [int64]$Matches[1] * 1000000 + [int64]$Matches[2] * 1000 + [int64]$Matches[3] }
+    return $null
+}
+try {
+    $vjFw = Get-Content -LiteralPath $VerPath -Raw | ConvertFrom-Json
+    $bios = [string](Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion
+    $need = Get-FwRev ([string]$vjFw.minFirmware)
+    if ($need -and $bios -like 'PSWloader*') {
+        $have = Get-FwRev $bios
+        if ($null -eq $have -or $have -lt $need) {
+            Write-Log "Outdated PSWloader.elf/firmware: running '$bios', this installation needs $($vjFw.minFirmware) or newer"
+            Add-Type -AssemblyName System.Windows.Forms
+            [void][System.Windows.Forms.MessageBox]::Show(
+                "PSWloader.elf is outdated.`r`n`r`nThis Windows is set up for PSWloader $($vjFw.version) (firmware $($vjFw.minFirmware) or newer), " +
+                "but the console was started with an older PSWloader.elf (running: $bios).`r`n`r`n" +
+                "Restarts, drivers and fan control can fail, and serious problems are possible.`r`n`r`n" +
+                "Replace PSWloader.elf in your Payload Manager with the files of the $($vjFw.version) release, then start PSWloader again.",
+                'PSWloader - outdated PSWloader.elf', 'OK', 'Warning')
+        }
+    }
+} catch { Write-Log "Firmware check skipped: $($_.Exception.Message)" }
+
 function Parse-SemVer([string]$v) {
     if (-not $v) { return [version]'0.0.0' }
     $clean = ($v.Trim() -replace '^[vV]', '') -replace '[^0-9.].*$', ''

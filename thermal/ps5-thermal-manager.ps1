@@ -1,4 +1,6 @@
-﻿# ps5-thermal-manager.ps1 v1.7.0 (18.11.2026; v1.7.0 = real OC through ps5pwr 1.14.0 (caps 0x200), clock regulator, no curve:
+﻿# ps5-thermal-manager.ps1 v1.8.0 (24.11.2026; v1.8.0 = with ps5pwr 1.17+ (caps 0x2000) the driver runs the PS5 Linux fan curve:
+#   no fan target writes here any more (event fan_driver_curve), fan_status telemetry stays)
+# ps5-thermal-manager.ps1 v1.7.0 (18.11.2026; v1.7.0 = real OC through ps5pwr 1.14.0 (caps 0x200), clock regulator, no curve:
 #   in oc, REG_DWORDs under HKLM\SYSTEM\CurrentControlSet\Services\ps5pwr\Parameters decide (all 0 = today's oc): OcGfxMhz
 #   (ForceGfxFreq 2231..2600, 0 = off), OcGfxMv (ForceGfxVid 700..1129 mV before the clock, 0 = no voltage), OcCpuBoostMhz
 #   (SetMaxCpuBoostClk 3200..4000, 0 = off), OcCpuVidScale (signed, -50..-1, 0 = off). Applied once per Windows boot (marker
@@ -141,6 +143,7 @@ $DriverHasBapm = ($LoadedPs5Pwr.version -in @([version]'1.10.3', [version]'1.12.
 $DriverHasHold = ($LoadedPs5Pwr.version -eq [version]'1.12.0' -and -not $LoadedPs5Pwr.staged_not_loaded)   # v1.6.13: GFXCLK op 5   # v1.6.3: only the 1.10.3 image has IOCTL 0x90C
 if (-not $BoostWindow) { $NoBoostWindow = [switch]$true }   # v1.6.8: window is opt-in
 $FanMinC = if ($DriverHasBoost) { 50 } else { 60 }   # loaded v1.8.2+: 50..100, else 60..100
+$DriverFanCurve = $false
 # v1.5.0: ask the loaded driver itself (no ICC, works without a started device). Falls back to the hash result above.
 $LoadedPs5Pwr.caps = $null; $LoadedPs5Pwr.reported = $null; $LoadedPs5Pwr.caps_source = 'hash'
 try {
@@ -162,6 +165,7 @@ if ($LoadedPs5Pwr.caps_source -eq 'ioctl') {
   $DriverHasBoost = [bool]($LoadedPs5Pwr.caps -band 0x08)
   $FanMinC = if ($LoadedPs5Pwr.caps -band 0x10) { 50 } else { 60 }
   if (-not ($LoadedPs5Pwr.caps -band 0x20)) { $FanPollSeconds = 0 }
+  $DriverFanCurve = [bool]($LoadedPs5Pwr.caps -band 0x2000)   # v1.8.0: ps5pwr 1.17+ drives the fan itself (PS5 Linux curve)
   $hv = $LoadedPs5Pwr.version; $rv = [version]$LoadedPs5Pwr.reported
   $LoadedPs5Pwr.hash_matches = ($hv -and $hv.Major -eq $rv.Major -and $hv.Minor -eq $rv.Minor -and [Math]::Max($hv.Build, 0) -eq [Math]::Max($rv.Build, 0))   # cross-check: loaded == file
   if ($rv -ge [version]'1.12.1') {   # v1.6.14: caps 0x40 BAPM, 0x80 HOLD + above-stock request (meaning fixed from 1.12.1 on)
@@ -459,7 +463,9 @@ if ($ocWanted -and $DriverHasOc -and $ocCli) {
     W ([ordered]@{ event = 'oc_force'; gpu_forced = $ocGpu; mhz = $ocCur; mv = $OcGfxMv; result = $res })
   }
 } elseif ($ocWanted) { W ([ordered]@{ event = 'oc_unavailable'; driver_has_oc = $DriverHasOc; cli_has_oc = $ocCli; driver = $Driver }) }
-$fanOk = Set-Fan; $lastFan = Get-Date; $lastSample = Get-Date
+if ($DriverFanCurve) { $fanOk = $false; W ([ordered]@{ event = 'fan_driver_curve'; ps5pwr = $LoadedPs5Pwr }) }   # v1.8.0: no fan target writes
+else { $fanOk = Set-Fan }
+$lastFan = Get-Date; $lastSample = Get-Date
 $fanPoll = ($FanPollSeconds -gt 0); $lastFanPoll = [datetime]::MinValue; $fanErr = 0
 $lastGfxMeas = [datetime]::MinValue   # v1.6.5
 $hist = New-Object System.Collections.Generic.List[double]
@@ -533,7 +539,7 @@ while ($true) {
     } catch { W ([ordered]@{ event = 'fan_status_error'; error = $_.Exception.Message }); $fanErr++; if ($fanErr -ge 5) { $fanPoll = $false } }
   }
   if (((Get-Date) - $lastSample).TotalSeconds -ge 60) { W ([ordered]@{ event = 'sample'; tctl_c = $t; tctl_raw_c = $raw; gpu_mhz = $gpuSet; cpu_max = $cpu; oc_mhz = $(if ($ocGpu) { $ocCur } else { $null }) }); $lastSample = Get-Date }
-  if (((Get-Date) - $lastFan).TotalSeconds -ge ($(if ($fanOk) { 600 } else { 30 }))) { $fanOk = Set-Fan; $lastFan = Get-Date }
+  if (-not $DriverFanCurve -and ((Get-Date) - $lastFan).TotalSeconds -ge ($(if ($fanOk) { 600 } else { 30 }))) { $fanOk = Set-Fan; $lastFan = Get-Date }
   if ($GfxMeasuredSeconds -gt 0 -and ((Get-Date) - $lastGfxMeas).TotalSeconds -ge $GfxMeasuredSeconds) {   # v1.6.5
     $lastGfxMeas = Get-Date; $g = Get-KmdGfx
     if ($g) { $g['event'] = 'gfx_measured'; $g['tctl_c'] = $t; W $g }

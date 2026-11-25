@@ -8,12 +8,14 @@ static void w32(uint8_t *p, uint32_t x) { w16(p, (uint16_t)x); w16(p + 2, (uint1
 static void w64(uint8_t *p, uint64_t x) { w32(p, (uint32_t)x); w32(p + 4, (uint32_t)(x >> 32)); }
 static void copy(uint8_t *d, const uint8_t *s, size_t n) { while (n--) *d++ = *s++; }
 static const uint8_t guid[16] = {0xcb,0xba,0x4e,0xec,0x38,0x26,0x6e,0x41,0xbe,0x80,0xe5,0xfa,0x4b,0x51,0x19,0x01};
-static const uint64_t cuts[] = {0x80000000,0xc4400000,0xd0000000,0xe0700000,UINT64_C(0x980000000),UINT64_C(0x9a0000000)};
+/* r5.26.7 (version independence): the windows are no longer the ones measured on 13.60 but the ones GameOS programmed
+ * into the two root ports (ps5_pci_windows), like PS5 Linux takes them. On 13.60 they are the old constants:
+ * 80000000..c43fffff, d0000000..e06fffff and 980000000..99fffffff. */
 static int overlaps(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { return a < d && c < b; }
-static int in_aperture(uint64_t a, uint64_t b) {
-    return overlaps(a,b,0x80000000,0xe0700000) || overlaps(a,b,cuts[4],cuts[5]);
+static int in_aperture(const uint64_t *cuts, uint64_t a, uint64_t b) {
+    return overlaps(a,b,cuts[0],cuts[3]) || overlaps(a,b,cuts[4],cuts[5]);
 }
-static int in_window(uint64_t a, uint64_t b) {
+static int in_window(const uint64_t *cuts, uint64_t a, uint64_t b) {
     for (unsigned i = 0; i < 6; i += 2) if (a >= cuts[i] && b <= cuts[i + 1]) return 1;
     return 0;
 }
@@ -28,7 +30,7 @@ int ps5_pci_profile_mismatch(const uint8_t *sony, const uint8_t *amd, size_t con
         {0x02,0xff,{0xdf,0xe5}}, {0x03,0xff,{0x13,0x13}},
         {0x04,0x06,{0x06,0x06}}, {0x0e,0x7f,{0x01,0x01}},
         {0x18,0xff,{0x00,0x00}}, {0x19,0xff,{0x40,0x20}},
-        {0x1a,0xff,{0x40,0x20}}, {0x1c,0xff,{0xf1,0x21}},
+        {0x1a,0xff,{0x40,0x20}}, {0x1c,0xff,{0xf1,0x21}},   /* 0x19/0x1a: expected only for the report, see bus_ok */
         {0x1d,0xff,{0x01,0x21}}, {0x20,0xff,{0x00,0x00}},
         {0x21,0xff,{0x80,0xd0}}, {0x22,0xff,{0x30,0x60}},
         {0x23,0xff,{0xc4,0xe0}}, {0x24,0xff,{0x01,0xf1}},
@@ -57,6 +59,18 @@ int ps5_pci_profile_mismatch(const uint8_t *sony, const uint8_t *amd, size_t con
         uint64_t prefetch_limit = ((uint64_t)r32(p + 0x2c) << 32)
             | ((uint64_t)(r16(p + 0x26) & 0xfff0) << 16) | 0xfffff;
         int prefetch_disabled = prefetch_base > prefetch_limit;
+        /* r5.26.7 (version independence, issue #4; r5.25.24 only accepted windows inside the 13.60 ones): any active
+         * 32-bit memory window between 2 GiB and the ECAM at f0000000 is accepted - the HOB and ACPI apertures are built
+         * from it (ps5_pci_windows); the windows of both ports must not overlap (checked below). Sony may have any active
+         * 64-bit prefetch window between 4 GiB and 1 TiB; AMD's stays disabled. Bus numbers: primary 0, then any
+         * secondary/subordinate range inside the ECAM buses 01..7f, the two ranges disjoint. */
+        uint32_t mem_base = (uint32_t)(r16(p + 0x20) & 0xfff0) << 16;
+        uint32_t mem_limit = ((uint32_t)(r16(p + 0x22) & 0xfff0) << 16) | 0xfffff;
+        int mem_inside = mem_base <= mem_limit && mem_base >= 0x80000000u && mem_limit < 0xf0000000u
+            && (p[0x20] & 0x0f) == 0 && (p[0x22] & 0x0f) == 0;
+        int pf_inside = !b && !prefetch_disabled && (p[0x24] & 0x0f) == 1 && (p[0x26] & 0x0f) == 1
+            && prefetch_base >= UINT64_C(0x100000000) && prefetch_limit < (UINT64_C(1) << 40);
+        int bus_ok = p[0x19] >= 1 && p[0x19] <= p[0x1a] && p[0x1a] <= 0x7f;
         for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
             uint8_t required = fields[i].expected[b], bits = fields[i].mask;
             if (fields[i].offset == 0x1c || fields[i].offset == 0x1d) {
@@ -78,6 +92,9 @@ int ps5_pci_profile_mismatch(const uint8_t *sony, const uint8_t *amd, size_t con
                 } else if (prefetch_disabled) continue;
             }
             if (fields[i].offset >= 0x30 && io_disabled) continue;
+            if ((fields[i].offset == 0x19 || fields[i].offset == 0x1a) && bus_ok) continue;
+            if (fields[i].offset >= 0x20 && fields[i].offset <= 0x23 && mem_inside) continue;
+            if (fields[i].offset >= 0x24 && fields[i].offset <= 0x2f && pf_inside) continue;
             if ((p[fields[i].offset] & bits) != required) {
                 *bridge = b; *offset = fields[i].offset;
                 *actual = p[fields[i].offset]; *expected = required;
@@ -86,6 +103,64 @@ int ps5_pci_profile_mismatch(const uint8_t *sony, const uint8_t *amd, size_t con
             }
         }
     }
+    /* r5.26.7: the two ports must not share buses or memory */
+    if (!(amd[0x1a] < sony[0x19] || sony[0x1a] < amd[0x19])) {
+        *bridge = 1; *offset = 0x19; *actual = amd[0x19]; *expected = 0; *mask = 0; return 1;
+    }
+    uint64_t sb = (uint64_t)(r16(sony + 0x20) & 0xfff0) << 16, sl = (((uint64_t)(r16(sony + 0x22) & 0xfff0) << 16) | 0xfffff) + 1;
+    uint64_t ab = (uint64_t)(r16(amd + 0x20) & 0xfff0) << 16, al = (((uint64_t)(r16(amd + 0x22) & 0xfff0) << 16) | 0xfffff) + 1;
+    if (overlaps(sb,sl,ab,al)) {
+        *bridge = 1; *offset = 0x20; *actual = amd[0x20]; *expected = 0; *mask = 0; return 1;
+    }
+    return 0;
+}
+int ps5_pci_windows(const uint8_t *sony, const uint8_t *amd, size_t config_size, struct ps5_pci_windows *w) {
+    unsigned bridge, offset; uint8_t actual, expected, mask;
+    if (!w) return -1;
+    int m = ps5_pci_profile_mismatch(sony,amd,config_size,&bridge,&offset,&actual,&expected,&mask);
+    if (m) return m;
+    uint64_t sb = (uint64_t)(r16(sony + 0x20) & 0xfff0) << 16, sl = (((uint64_t)(r16(sony + 0x22) & 0xfff0) << 16) | 0xfffff) + 1;
+    uint64_t ab = (uint64_t)(r16(amd + 0x20) & 0xfff0) << 16, al = (((uint64_t)(r16(amd + 0x22) & 0xfff0) << 16) | 0xfffff) + 1;
+    if (sb < ab) { w->cut[0] = sb; w->cut[1] = sl; w->cut[2] = ab; w->cut[3] = al; }
+    else { w->cut[0] = ab; w->cut[1] = al; w->cut[2] = sb; w->cut[3] = sl; }
+    uint64_t pb = ((uint64_t)r32(sony + 0x28) << 32) | ((uint64_t)(r16(sony + 0x24) & 0xfff0) << 16);
+    uint64_t pl = ((uint64_t)r32(sony + 0x2c) << 32) | ((uint64_t)(r16(sony + 0x26) & 0xfff0) << 16) | 0xfffff;
+    if (pb <= pl) { w->cut[4] = pb; w->cut[5] = pl + 1; }
+    else { w->cut[4] = UINT64_C(0x980000000); w->cut[5] = UINT64_C(0x9a0000000); }   /* disabled: the 13.60 aperture as before */
+    return 0;
+}
+/* r5.26.7: a memory window grows to the reserved block of the memory map that encloses it (never below 2 GiB, never
+ * into ECAM or the other window). r5.25.24 accepted a window GameOS made smaller than the 13.60 one while the memory map
+ * still reserved the whole 13.60 range; that range stays the aperture. On 13.60 window and block are the same. */
+static int reserved_at(const uint8_t *input, size_t input_size, uint64_t x) {
+    size_t off = 0;
+    while (off + 8 <= input_size) {
+        const uint8_t *p = input + off; unsigned type = r16(p), length = r16(p + 2);
+        if (type == 0xffff || length < 8 || length > input_size - off) break;
+        if (type == 3 && length == 48 && r32(p + 24) == 5) {
+            uint64_t a = r64(p + 32), n = r64(p + 40);
+            if (x >= a && x - a < n) return 1;
+        }
+        off += length;
+    }
+    return 0;
+}
+static void grow(const uint8_t *input, size_t input_size, uint64_t *lo, uint64_t *hi, uint64_t floor, uint64_t ceiling) {
+    /* whole MiB steps only (bridge windows have MiB granularity) */
+    while (*lo >= floor + 0x100000 && reserved_at(input,input_size,*lo - 1) && reserved_at(input,input_size,*lo - 0x100000))
+        *lo -= 0x100000;
+    while (*hi + 0x100000 <= ceiling && reserved_at(input,input_size,*hi) && reserved_at(input,input_size,*hi + 0xfffff))
+        *hi += 0x100000;
+}
+int ps5_pci_handoff_windows(const uint8_t *input, size_t input_size, const uint8_t *sony, const uint8_t *amd,
+                            size_t config_size, struct ps5_pci_windows *w) {
+    if (!input || input_size < 64 || input_size > PS5_HOB_CAPACITY) return -1;
+    int m = ps5_pci_windows(sony,amd,config_size,w);
+    if (m) return m;
+    uint64_t lo0 = w->cut[0], hi0 = w->cut[1], lo1 = w->cut[2], hi1 = w->cut[3];
+    grow(input,input_size,&lo0,&hi0,0x80000000u,lo1);
+    grow(input,input_size,&lo1,&hi1,hi0,0xf0000000u);
+    w->cut[0] = lo0; w->cut[1] = hi0; w->cut[2] = lo1; w->cut[3] = hi1;
     return 0;
 }
 int ps5_add_pci_handoff(const uint8_t *input, size_t input_size,
@@ -94,10 +169,9 @@ int ps5_add_pci_handoff(const uint8_t *input, size_t input_size,
     if (!input || !sony || !amd || !output || !result || config_size < 64
             || input_size < 64 || input_size > PS5_HOB_CAPACITY || capacity < 64
             || result->hob_bytes != input_size || input == output) return -1;
-    unsigned bridge, offset_mismatch;
-    uint8_t actual, expected, mask;
-    if (ps5_pci_profile_mismatch(sony,amd,config_size,&bridge,&offset_mismatch,
-                                 &actual,&expected,&mask) != 0) return -2;
+    struct ps5_pci_windows win;
+    if (ps5_pci_handoff_windows(input,input_size,sony,amd,config_size,&win) != 0) return -2;
+    const uint64_t *cuts = win.cut;
     if (r16(input) != 1 || r16(input + 2) != 56
             || r64(input + 48) != PS5_HOB_BASE + input_size - 8) return -3;
     size_t used = 0, offset = 0;
@@ -115,7 +189,7 @@ int ps5_add_pci_handoff(const uint8_t *input, size_t input_size,
         if (type == 2) {
             if (length != 48) return -3;
             uint64_t a = r64(p + 24), n = r64(p + 32);
-            if (a + n < a || in_aperture(a,a + n)) return -4;
+            if (a + n < a || in_aperture(cuts,a,a + n)) return -4;
         }
         if (type == 3) {
             if (length != 48) return -3;
@@ -127,10 +201,10 @@ int ps5_add_pci_handoff(const uint8_t *input, size_t input_size,
                 uint64_t b = end;
                 for (unsigned i = 0; i < 6; i++) if (cuts[i] > a && cuts[i] < b) b = cuts[i];
                 uint32_t target_kind = kind;
-                if (in_aperture(a,b)) {
+                if (in_aperture(cuts,a,b)) {
                     // Never turn RAM, ACPI/NVS or an unexplained reserved gap
                     // into a PCI aperture. Only known MMIO windows are retagged.
-                    if (!in_window(a,b) || kind != 5) return -4;
+                    if (!in_window(cuts,a,b) || kind != 5) return -4;
                     target_kind = 1; // EFI_RESOURCE_MEMORY_MAPPED_IO
                     for (unsigned i = 0; i < 2; i++)
                         if (a >= cuts[i * 2] && b <= cuts[i * 2 + 1]) coverage[i] += b - a;
@@ -148,7 +222,7 @@ int ps5_add_pci_handoff(const uint8_t *input, size_t input_size,
         offset += length;
     }
     if (r16(input + offset) != 0xffff || r16(input + offset + 2) != 8
-            || coverage[0] != cuts[1] - cuts[0] || coverage[1] != cuts[3] - cuts[2]) return -4;
+            || coverage[0] == 0 || coverage[1] == 0) return -4;   /* r5.26.7: a window may extend over a gap of the memory map (no RAM there), not over RAM */
     if (capacity - used < 224) return -5;
     uint8_t *h = output + used;
     for (unsigned i = 0; i < 224; i++) h[i] = 0;
@@ -160,7 +234,7 @@ int ps5_add_pci_handoff(const uint8_t *input, size_t input_size,
     for (unsigned i = 0; i < 6; i++) w64(root + 30 + i * 24,UINT64_MAX);
     w64(root + 30,0); w64(root + 38,0x7f);
     w64(root + 54,0x1000); w64(root + 62,0x2fff);
-    w64(root + 78,0x80000000); w64(root + 86,0xe06fffff);
+    w64(root + 78,cuts[0]); w64(root + 86,cuts[3] - 1);
     w64(root + 150,cuts[4]); w64(root + 158,cuts[5] - 1);
     w32(root + 174,0x0a0341d0); // PNP0A03, UID0, matching current DSDT.
     used += 216;

@@ -1,16 +1,16 @@
-; ps5pwr.inf v1.16.0 - PS5 platform power + indicator (Sony 104D:9107 Salina glue, ICC mailbox)
+; ps5pwr.inf v1.17.2 - PS5 platform power + indicator (Sony 104D:9107 Salina glue, ICC mailbox)
 ; Signed with the PSWloader Driver Signing certificate (trusted root + trusted publisher required). GPL-2.0-only (see ps5pwr.c).
 ; v1.4: HDMI hotplug replay, OFF by default: Services\ps5pwr\Parameters\HotplugMode (DWORD 0..3, see ps5pwr.c).
 ; v1.5-v1.9: fan target/duty/temperature zones, Tctl, SMU GFXCLK/boost (admin IOCTLs). v1.10: power button -> event
 ;   Global\Ps5PowerButton, kill switch Parameters\EnablePowerButton (DWORD, default 1). v1.10.1: hotplug 720p144 recognition. v1.10.2: 128-byte bridge read.
-;   v1.16.0: restart left to the firmware (PswWarmReentry) - Windows restart lands in PSWloader, not GameOS. v1.10.3: BAPM init. v1.14.0: OC ops (forced GFX clock/voltage, CPU boost/curve/limits, only on request, reset at stop/S5/bugcheck). v1.13.2: HP_PROGRAM sets the current mode. v1.13.1: boot sink picked again after a first pick. v1.13.0: HotplugMode 4 (pick the new sink's mode, PswHotplug event, program-bridge IOCTL). v1.12.1: VERSION IOCTL (loaded version + capabilities). v1.12.0: boost window HOLD + RequestGfxclk up to 2400 MHz only on explicit request (admin IOCTL).
+;   v1.17.0: PS5 Linux fan curve in the driver (FanCurve=0 switches it off). v1.16.0: restart left to the firmware (PswWarmReentry) - Windows restart lands in PSWloader, not GameOS. v1.10.3: BAPM init. v1.14.0: OC ops (forced GFX clock/voltage, CPU boost/curve/limits, only on request, reset at stop/S5/bugcheck). v1.13.2: HP_PROGRAM sets the current mode. v1.13.1: boot sink picked again after a first pick. v1.13.0: HotplugMode 4 (pick the new sink's mode, PswHotplug event, program-bridge IOCTL). v1.12.1: VERSION IOCTL (loaded version + capabilities). v1.12.0: boost window HOLD + RequestGfxclk up to 2400 MHz only on explicit request (admin IOCTL).
 [Version]
 Signature   = "$WINDOWS NT$"
 Class       = System
 ClassGUID   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %Mfg%
 CatalogFile = ps5pwr.cat
-DriverVer   = 11/19/2026,1.16.0.0
+DriverVer   = 11/24/2026,1.17.2.0
 PnpLockdown = 1
 
 [Manufacturer]

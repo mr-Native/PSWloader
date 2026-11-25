@@ -92,11 +92,13 @@ function Save-Result([string]$Status, [string]$TargetVer) {
 
 # Read target version from payload\version.json
 $TargetVersion = 'unknown'
+$MinFirmware = ''   # v1.1: firmware revision this release needs (PSWUpdateCheck warns at sign-in when an older one runs)
 $VersionJsonPath = Join-Path $PayloadDir 'version.json'
 if (Test-Path $VersionJsonPath) {
     try {
         $vj = Get-Content -Path $VersionJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($vj.version) { $TargetVersion = [string]$vj.version }
+        if ($vj.minFirmware) { $MinFirmware = [string]$vj.minFirmware }
     } catch {
         LogWarn "Could not parse payload\version.json: $_"
     }
@@ -120,6 +122,31 @@ LogInfo "Updater root     : $Root"
 LogInfo "Log file         : $LogFile"
 LogInfo "OS               : $([System.Environment]::OSVersion.VersionString)"
 LogInfo "============================================================"
+
+# 1a. v1.1: no downgrade - an older updater package must not replace a newer installation (drivers, scripts, firmware
+#     files). Versions like v1.0.4, v1.0.5-beta, v1.1: numbers first, a release ranks above its own betas; an unreadable
+#     installed version (pre-1.0.3 installs) is not blocked. Updaters up to v1.0.5 do not have this check.
+function Compare-PswVersion([string]$A, [string]$B) {   # -1 / 0 / 1, $null when one of them is not a version
+    $re = '^\s*[vV]?(\d+(?:\.\d+)*)(?:-(\S+))?\s*$'
+    if ($A -notmatch $re -or $B -notmatch $re) { return $null }
+    $p = foreach ($v in $A, $B) {
+        [void]($v -match $re)
+        $n = @($Matches[1].Split('.') | ForEach-Object { [int]$_ }); while ($n.Count -lt 3) { $n += 0 }
+        , @($n, $Matches[2]) }
+    for ($i = 0; $i -lt [Math]::Max($p[0][0].Count, $p[1][0].Count); $i++) {
+        $x = if ($i -lt $p[0][0].Count) { $p[0][0][$i] } else { 0 }; $y = if ($i -lt $p[1][0].Count) { $p[1][0][$i] } else { 0 }
+        if ($x -ne $y) { return [Math]::Sign($x - $y) } }
+    if ($p[0][1] -eq $p[1][1]) { return 0 }
+    if (-not $p[0][1]) { return 1 }; if (-not $p[1][1]) { return -1 }
+    return [Math]::Sign([string]::CompareOrdinal($p[0][1], $p[1][1]))
+}
+$VerCmp = Compare-PswVersion $TargetVersion $PrevVersion
+if ($null -ne $VerCmp -and $VerCmp -lt 0) {
+    LogErr "Downgrade blocked: PSWloader $PrevVersion is installed, this updater is for the older $TargetVersion. Nothing was changed."
+    LogErr "Get the current updater from https://github.com/mr-Native/PSWloader/releases"
+    Save-Result 'BLOCKED' $TargetVersion
+    exit 3
+}
 
 # 1. Verify elevation & payload
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -207,6 +234,26 @@ try {
     $script:Warnings++; LogWarn "GPU: could not prepare the driver prerequisites: $_"
 }
 
+# 2c. v1.1: x64 VC runtime DLLs for the GPU user-mode driver - BEFORE the drivers (a v1.0.4 install had none: during the GPU
+# driver install DWM crash-looped, the screen flashed and the updater looked stuck, DM report 24.11.) (msvcp140, vcruntime140, vcruntime140_1). Without them DWM
+# cannot create its D3D device (0x889800B2) and the screen stays black after the GPU driver - installs where VC_redist hung.
+$VcrtDir = Join-Path $PayloadDir 'vcruntime\x64'
+if (Test-Path $VcrtDir) {
+    foreach ($src in Get-ChildItem -Path $VcrtDir -Filter '*.dll' -File) {
+        try {
+            $dst = Join-Path "$env:SystemRoot\System32" $src.Name
+            $new = $src.VersionInfo.FileVersionRaw
+            $old = if (Test-Path $dst) { (Get-Item $dst).VersionInfo.FileVersionRaw } else { $null }
+            if (-not $old -or $old -lt $new) {
+                Copy-Item -Path $src.FullName -Destination $dst -Force
+                LogOk "$($src.Name) $new -> System32 (was $(if ($old) { $old } else { 'missing' }))"
+            }
+        } catch {
+            LogWarn "Could not install $($src.Name): $_"
+        }
+    }
+}
+
 # 3. Install / update all drivers in payload\drivers\*
 $DriversDir = Join-Path $PayloadDir 'drivers'
 if (Test-Path $DriversDir) {
@@ -223,12 +270,30 @@ if (Test-Path $DriversDir) {
             $newVer = ((Select-String -Path $inf.FullName -Pattern '^\s*DriverVer\s*=\s*[^,]+,\s*([0-9.]+)' | Select-Object -First 1).Matches.Groups[1].Value)
             $pwrDevs = @($pwrDevs | Where-Object { ($_ | Get-PnpDeviceProperty DEVPKEY_Device_DriverVersion -ErrorAction SilentlyContinue).Data -ne $newVer })
         }
-        $pnpArgs = if ($pwrDevs.Count) { "/add-driver `"$($inf.FullName)`"" } else { "/add-driver `"$($inf.FullName)`" /install" }
+        # v1.1: the GPU driver too is only staged and put in at the next start (ConfigFlags 0x20) when bc250kmd already runs -
+        # a live display driver swap can keep pnputil busy or leave the screen dark (HW 24.11.: 0.7.216.1227 staged + one
+        # restart, loaded and HDMI audio on). Unlike ps5pwr one restart is enough.
+        $gpuDevs = @()
+        if ($inf.Name -ieq 'ps5gpu.inf') {
+            $newVer = ((Select-String -Path $inf.FullName -Pattern '^\s*DriverVer\s*=\s*[^,]+,\s*([0-9.]+)' | Select-Object -First 1).Matches.Groups[1].Value)
+            $gpuDevs = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+                Where-Object { $_.Service -eq 'bc250kmd' -and @($_.HardwareID) -like 'PCI\VEN_1002&DEV_13*' } |
+                Where-Object { ($_ | Get-PnpDeviceProperty DEVPKEY_Device_DriverVersion -ErrorAction SilentlyContinue).Data -ne $newVer })
+        }
+        $pnpArgs = if ($pwrDevs.Count -or $gpuDevs.Count) { "/add-driver `"$($inf.FullName)`"" } else { "/add-driver `"$($inf.FullName)`" /install" }
         $p = Start-Process -FilePath "$env:SystemRoot\System32\pnputil.exe" `
             -ArgumentList $pnpArgs `
-            -NoNewWindow -Wait -PassThru `
+            -NoNewWindow -PassThru `
             -RedirectStandardOutput "$env:TEMP\pswupd-pnp-out.txt" `
             -RedirectStandardError "$env:TEMP\pswupd-pnp-err.txt"
+        $null = $p.Handle   # Windows PowerShell 5.1: keeps ExitCode readable after WaitForExit without -Wait
+        # v1.1: at most 5 minutes per package - a display driver swap can keep pnputil busy; the package is in the driver
+        # store by then and Windows finishes it at the next start
+        if (-not $p.WaitForExit(300000)) {
+            $script:Warnings++
+            LogWarn "  Driver $rel`: pnputil did not finish in 5 minutes - the update goes on, Windows completes the driver at the next start"
+            continue
+        }
         $out = ''
         if (Test-Path "$env:TEMP\pswupd-pnp-out.txt") { $out = (Get-Content "$env:TEMP\pswupd-pnp-out.txt" -Raw -ErrorAction SilentlyContinue).Trim() }
         if ($out) {
@@ -244,6 +309,13 @@ if (Test-Path $DriversDir) {
             $script:RestartTwice = $true
             $script:DriversInstalled++
             LogOk "  Driver $rel staged; it is installed at the next start and loaded at the start after that (restart twice)"
+        } elseif (($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010 -or $p.ExitCode -eq 259) -and $gpuDevs.Count) {
+            foreach ($d in $gpuDevs) {
+                if (Set-ReinstallAtBoot $d.InstanceId) { LogOk "  $($d.InstanceId): GPU driver put in at the next start (no display restart now)" }
+                else { $script:Warnings++; LogWarn "  $($d.InstanceId): could not set the reinstall flag - the GPU stays on the old driver" }
+            }
+            $script:DriversInstalled++
+            LogOk "  Driver $rel staged; it is installed at the next start"
         } elseif ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
             $script:DriversInstalled++
             LogOk "  Driver $rel installed/updated (exit $($p.ExitCode))"
@@ -338,6 +410,19 @@ try {
     LogWarn "Could not cache PS5WIFIFW.BIN fallback: $_"
 }
 
+# 4d2. v1.0.5 (issue #8): memory integrity (HVCI) and VBS off - with them on, Windows refuses the PS5 kernel drivers (Code 39)
+try {
+    $dg = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
+    $hv = "$dg\Scenarios\HypervisorEnforcedCodeIntegrity"
+    if (-not (Test-Path $hv)) { New-Item -Path $hv -Force | Out-Null }
+    if ((Get-ItemProperty -Path $hv -Name Enabled -ErrorAction SilentlyContinue).Enabled -ne 0) {
+        Set-ItemProperty -Path $hv -Name Enabled -Value 0 -Type DWord; LogOk "Memory integrity (HVCI) turned off - takes effect after the restart" }
+    if ((Get-ItemProperty -Path $dg -Name EnableVirtualizationBasedSecurity -ErrorAction SilentlyContinue).EnableVirtualizationBasedSecurity -ne 0) {
+        Set-ItemProperty -Path $dg -Name EnableVirtualizationBasedSecurity -Value 0 -Type DWord; LogOk "VBS turned off - takes effect after the restart" }
+} catch {
+    LogWarn "Could not turn off memory integrity: $_"
+}
+
 # 5. Update tools and scripts in C:\ProgramData\PSWloader\tools
 LogInfo "Step 4/5: Updating PSWloader tools and scripts..."
 $ToolsSrc = Join-Path $PayloadDir 'tools'
@@ -352,6 +437,51 @@ if (Test-Path $ToolsSrc) {
     }
 } else {
     LogInfo "No tools directory in payload, skipping."
+}
+
+# 5c. v1.0.5: ThermalManager (C:\ps5-work) - with ps5pwr 1.17+ the driver runs the fan curve and the manager stops writing fan targets
+$TmSrc = Join-Path $ToolsSrc 'thermal\ps5-thermal-manager.ps1'
+if ((Test-Path $TmSrc) -and (Test-Path 'C:\ps5-work\ps5-thermal-manager.ps1')) {
+    try {
+        $tmTask = Get-ScheduledTask -TaskName 'PSW-ThermalManager' -ErrorAction SilentlyContinue
+        if ($tmTask) { Stop-ScheduledTask -TaskName 'PSW-ThermalManager' -ErrorAction SilentlyContinue }
+        Copy-Item -Path $TmSrc -Destination 'C:\ps5-work\ps5-thermal-manager.ps1' -Force
+        if ($tmTask) { Start-ScheduledTask -TaskName 'PSW-ThermalManager' -ErrorAction SilentlyContinue }
+        LogOk "Updated the ThermalManager in C:\ps5-work"
+        # v1.1: the fixed 60 C fan target task fought the driver's PS5 Linux fan curve (ps5pwr 1.17+) - removed
+        if (Get-ScheduledTask -TaskName 'PSW-FanTarget' -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName 'PSW-FanTarget' -Confirm:$false; LogOk "Removed the task PSW-FanTarget (the driver controls the fan)" }
+    } catch {
+        LogWarn "Could not update the ThermalManager: $_"
+    }
+}
+
+# 5d. v1.1: desktop corner text - psw-hide-testmode.ps1 v2.1 also hides the edition line ("Windows 11 Pro"); only where the
+#     Watermark component is installed (the script and its startup task exist)
+$HtSrc = Join-Path $ToolsSrc 'psw-hide-testmode.ps1'; $HtDst = Join-Path $DataDir 'psw-hide-testmode.ps1'
+if ((Test-Path $HtSrc) -and (Test-Path $HtDst) -and (Get-ScheduledTask -TaskName 'PSW-HideTestMode' -ErrorAction SilentlyContinue)) {
+    try {
+        Copy-Item -Path $HtSrc -Destination $HtDst -Force
+        $ea = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" `
+            -Argument "--headless $env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$HtDst`" -Edition"
+        $es = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName 'PSW-HideEdition' -Action $ea -Trigger (New-ScheduledTaskTrigger -AtLogOn) `
+            -Principal (New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited) -Settings $es -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName 'PSW-HideEdition' -ErrorAction SilentlyContinue
+        # v1.1: the same as SYSTEM from system start with the native PSWEdition.exe - the line is gone ~30 ms after Explorer starts
+        $exeSrc = Join-Path $ToolsSrc 'PSWEdition.exe'; $exeDst = Join-Path $DataDir 'PSWEdition.exe'
+        Stop-ScheduledTask -TaskName 'PSW-HideEditionSys' -ErrorAction SilentlyContinue
+        Get-Process PSWEdition -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        if (Test-Path $exeSrc) { Copy-Item -Path $exeSrc -Destination $exeDst -Force }
+        $ya = New-ScheduledTaskAction -Execute $exeDst
+        $ys = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName 'PSW-HideEditionSys' -Action $ya -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+            -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest) -Settings $ys -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName 'PSW-HideEditionSys' -ErrorAction SilentlyContinue
+        LogOk "Desktop corner text: edition line hidden too (tasks PSW-HideEditionSys and PSW-HideEdition)"
+    } catch {
+        LogWarn "Could not update the desktop corner text script: $_"
+    }
 }
 
 # 5b. v1.0.5: support tool C:\PSWloader\selfcheck (PSWSelfCheck.cmd -> one zip with every log in ...\results)
@@ -407,7 +537,16 @@ if (Test-Path $FwSrc) {
 
 # 6b. v1.0.5: firmware for the next start on the EFI partition. The running firmware starts a newer
 #     \PSWloader\firmware\pswloader-upl.bin by itself, so PSWloader.elf does not have to be replaced for firmware updates.
+# v1.1 (HW 24.11.): a firmware before r5.26.3 restarts into an updated image with the firmware volume records of its own image
+#     and hangs when the layout differs (r5.26.2 is larger than r5.26.0/r5.26.1). Then the new firmware comes with the new
+#     PSWloader.elf only: nothing is placed, and a file left there for such a firmware is removed (it would hang twice before
+#     being marked failed). The sign-in warning (PSWUpdateCheck) asks for the new ELF.
 $uplSrc = Join-Path $FwSrc 'pswloader-upl.bin'
+$runRev = 0
+if ([string](Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue).SMBIOSBIOSVersion -match 'r(\d+)\.(\d+)\.(\d+)') {
+    $runRev = [int64]$Matches[1] * 1000000 + [int64]$Matches[2] * 1000 + [int64]$Matches[3] }
+$espSwitchOk = $runRev -ge 5026003
+if (-not $espSwitchOk) { LogInfo "Running firmware $(if ($runRev) { 'r{0}.{1}.{2}' -f [int]($runRev / 1000000), [int]($runRev / 1000 % 1000), [int]($runRev % 1000) } else { 'without revision' }) cannot switch to a firmware on the EFI partition safely - the new firmware comes with the new PSWloader.elf" }
 if (Test-Path $uplSrc) {
     $letter = $null
     foreach ($c in [char[]]'SRQPONMLKJIHGT') { if (-not (Test-Path "${c}:\")) { $letter = $c; break } }
@@ -416,12 +555,19 @@ if (Test-Path $uplSrc) {
             $mp = Start-Process -FilePath "$env:SystemRoot\System32\mountvol.exe" -ArgumentList "${letter}: /S" -NoNewWindow -Wait -PassThru
             if ($mp.ExitCode -eq 0 -and (Test-Path "${letter}:\")) {
                 $fwDir = "${letter}:\PSWloader\firmware"
+                if (-not $espSwitchOk) {
+                    if (Test-Path "$fwDir\pswloader-upl.bin") {
+                        Remove-Item -Path "$fwDir\pswloader-upl.bin", "$fwDir\update.txt" -Force -ErrorAction SilentlyContinue
+                        LogOk "Removed the firmware file from the EFI partition (the running firmware cannot start it safely)" }
+                    throw [System.OperationCanceledException]::new('skip')
+                }
                 New-Item -ItemType Directory -Path $fwDir -Force | Out-Null
                 Copy-Item -Path $uplSrc -Destination "$fwDir\pswloader-upl.bin.new" -Force   # copy first, then swap: never a half file
                 if ((Get-FileHash "$fwDir\pswloader-upl.bin.new").Hash -ne (Get-FileHash $uplSrc).Hash) { throw 'copy check failed' }
                 Move-Item -Path "$fwDir\pswloader-upl.bin.new" -Destination "$fwDir\pswloader-upl.bin" -Force
                 LogOk "Firmware for the next start placed on the EFI partition (\PSWloader\firmware\pswloader-upl.bin)"
             } else { LogWarn "EFI partition not reachable - the firmware update needs the new PSWloader.elf" }
+        } catch [System.OperationCanceledException] {
         } catch {
             LogWarn "Could not place the firmware on the EFI partition: $_"
         } finally {
@@ -478,6 +624,7 @@ $meta = [ordered]@{
     warnings        = $script:Warnings
     errors          = $script:Errors
 }
+if ($MinFirmware) { $meta.minFirmware = $MinFirmware }
 try {
     $meta | ConvertTo-Json -Depth 3 | Set-Content -Path $InstalledVersionPath -Encoding UTF8
 } catch {

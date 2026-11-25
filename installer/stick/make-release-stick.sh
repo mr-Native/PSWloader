@@ -1,6 +1,6 @@
 #!/bin/sh
 # make-release-stick.sh v2.2 (18 November 2026; v2.2: PSW\psw-wim.cmd (corner text out of boot.wim); v2.1: psw-specialize.cmd, PSW\drivers\installdrivers) - builds the folder whose CONTENT a user copies onto a stock Windows 11
-# setup stick, and the release zip pswloader-v1.0-USB-Stick.zip.
+# setup stick, and the release zip pswloader-v1.0-Install-Files.zip.
 #
 #   make-release-stick.sh DRIVERS EXTRA [OUT]
 #     DRIVERS  signed driver set (ps5gpu/ ps5pwr/ ps5gbe/ ps5cmos/ ps5m2flt/ ps5nvmsi/ pswdisk/ pswloader-signing.cer),
@@ -33,7 +33,7 @@ cp "$here/PSW/psw-drivers.cmd" "$here/PSW/psw-install.cmd" "$here/PSW/psw-wim.cm
 for d in ps5nvmsi ps5m2flt; do mkdir -p "$out/PSW/drivers/$d"; for e in inf sys cat; do need "$D/$d/$d.$e"; cp "$D/$d/$d.$e" "$out/PSW/drivers/$d/"; done; done
 need "$D/pswdisk/pswdisk.sys"; mkdir -p "$out/PSW/drivers/pswdisk"; cp "$D/pswdisk/pswdisk.sys" "$out/PSW/drivers/pswdisk/"
 need "$D/pswloader-signing.cer"; cp "$D/pswloader-signing.cer" "$out/PSW/drivers/"
-cp "$here/sources/\$OEM\$/\$\$/Setup/Scripts/SetupComplete.cmd" "$here/sources/\$OEM\$/\$\$/Setup/Scripts/psw-specialize.cmd" "$here/sources/\$OEM\$/\$\$/Setup/Scripts/psw-specialize.ps1" "$out/sources/\$OEM\$/\$\$/Setup/Scripts/"
+cp "$here/sources/\$OEM\$/\$\$/Setup/Scripts/SetupComplete.cmd" "$here/sources/\$OEM\$/\$\$/Setup/Scripts/psw-specialize.cmd" "$here/sources/\$OEM\$/\$\$/Setup/Scripts/psw-specialize.ps1" "$here/sources/\$OEM\$/\$\$/Setup/Scripts/psw-setupcomplete.ps1" "$here/sources/\$OEM\$/\$\$/Setup/Scripts/psw-firstlogin-status.ps1" "$out/sources/\$OEM\$/\$\$/Setup/Scripts/"   # v1.1: 20-minute limit + support zip, first sign-in notice
 # v2.1: PSW\drivers\installdrivers - the drivers the new Windows needs before the desktop (network, internal M.2), for the
 # "Install driver" button of the network page; psw-specialize.cmd installs the network driver by itself
 for d in ps5gbe ps5nvmsi ps5m2flt; do mkdir -p "$out/PSW/drivers/installdrivers/$d"; for e in inf sys cat; do need "$D/$d/$d.$e"; cp "$D/$d/$d.$e" "$out/PSW/drivers/installdrivers/$d/"; done; done
@@ -70,6 +70,6 @@ if find "$out" \( -iname '*unattend*.xml' ! -path "$out/autounattend.xml" -o -na
   echo 'REFUSED: secret, test or lab file in the release stick' >&2; exit 1; fi
 grep -q 'DiskConfiguration\|InstallTo\|ProductKey' "$out/autounattend.xml" && { echo 'REFUSED: autounattend.xml partitions disks' >&2; exit 1; }
 du -sh "$out"
-z="$(dirname "$out")/pswloader-v1.0-USB-Stick.zip"; rm -f "$z"
+z="$(dirname "$out")/pswloader-v1.0-Install-Files.zip"; rm -f "$z"
 (cd "$out" && TZ=UTC find . -exec touch -h -d '2026-11-18 00:00:00' {} + && find . -type f | sort | zip -X -q -@ "$z")
 sha256sum "$z"

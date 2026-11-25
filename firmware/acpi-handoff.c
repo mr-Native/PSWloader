@@ -90,3 +90,26 @@ int ps5_add_acpi_handoff(const uint8_t *input,size_t size,const uint8_t *arena,
     w64(output+40,PS5_HOB_BASE+used);w64(output+48,PS5_HOB_BASE+used-8);
     result->hob_bytes=used;return 0;
 }
+/* r5.26.7 (version independence): the PCI0 _CRS memory windows of the embedded DSDT follow the root ports
+ * (ps5_pci_windows) instead of the 13.60 values the arena was compiled with. The three descriptors are found by
+ * their compiled 13.60 contents (each exactly once), rewritten, and the DSDT checksum is fixed. With the 13.60 windows
+ * the arena stays byte-identical. */
+static const uint64_t crs13[3][3]={{0x80000000,0xc43fffff,0x44400000},{0xd0000000,0xe06fffff,0x10700000},
+                                    {UINT64_C(0x980000000),UINT64_C(0x99fffffff),0x20000000}};
+int ps5_acpi_set_pci_windows(uint8_t *arena,size_t size,const uint64_t cut[6]) {
+    if(!arena||!cut||ps5_validate_acpi(arena,size,PS5_ACPI_BASE))return -1;
+    if(cut[1]<=cut[0]||cut[3]<=cut[2]||cut[5]<=cut[4]||cut[3]>UINT64_C(0x100000000))return -1;
+    size_t x=(size_t)(r64(arena+24)-PS5_ACPI_BASE),f=(size_t)(r64(arena+x+36)-PS5_ACPI_BASE);
+    size_t d=(size_t)(r64(arena+f+140)-PS5_ACPI_BASE),len=r32(arena+d+4);
+    uint8_t *t=arena+d;size_t at[3]={0,0,0};unsigned found[3]={0,0,0};
+    for(size_t i=36;i+46<=len;i++) {
+        for(unsigned k=0;k<2;k++)
+            if(t[i]==0x87&&t[i+1]==0x17&&t[i+2]==0&&r32(t+i+10)==crs13[k][0]&&r32(t+i+14)==crs13[k][1]&&r32(t+i+22)==crs13[k][2]){at[k]=i;found[k]++;}
+        if(t[i]==0x8a&&t[i+1]==0x2b&&t[i+2]==0&&r64(t+i+14)==crs13[2][0]&&r64(t+i+22)==crs13[2][1]&&r64(t+i+38)==crs13[2][2]){at[2]=i;found[2]++;}
+    }
+    if(found[0]!=1||found[1]!=1||found[2]!=1)return -2;
+    for(unsigned k=0;k<2;k++){w32(t+at[k]+10,(uint32_t)cut[k*2]);w32(t+at[k]+14,(uint32_t)(cut[k*2+1]-1));w32(t+at[k]+22,(uint32_t)(cut[k*2+1]-cut[k*2]));}
+    w64(t+at[2]+14,cut[4]);w64(t+at[2]+22,cut[5]-1);w64(t+at[2]+38,cut[5]-cut[4]);
+    t[9]=0;{unsigned sum=0;for(size_t i=0;i<len;i++)sum+=t[i];t[9]=(uint8_t)(0x100-(sum&255));}
+    return ps5_validate_acpi(arena,size,PS5_ACPI_BASE)?-3:0;
+}

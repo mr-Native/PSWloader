@@ -24,8 +24,16 @@ typedef EFI_STATUS (EFIAPI *PS5_HDMI_VIDEO_FAN)(UINT32 TargetC,UINT32 *BeforeC,U
 typedef struct { INT32 r_duty, r_fan, r_temp, r_7227, r_7056; UINT32 fan_duty, fan_target_c; INT32 temp_milli_c;
                  UINT8 bridge_7227, bridge_7056[2], reserved; } PS5_HDMI_DIAG_ICC;
 typedef EFI_STATUS (EFIAPI *PS5_HDMI_VIDEO_DIAG_ICC)(PS5_HDMI_DIAG_ICC *Out);
+/* r5.26.2 (user 24.11.: the fan still spun up at every Windows start): the EMC fan table as PS5 Linux fan.c leaves it when
+ * the host stops driving the fan, from power-on instead of only once ps5pwr runs. Snapshot of the servo table (0x0a type
+ * 0x0f, 0x6ae bytes) into *Original, the quiet backup table derived from it (ps5_fc_prepare_backup) uploaded (type 0x0e) and
+ * the MainSoC zone set to EMC auto (type 2) - the EMC keeps regulating by itself, nothing depends on a later driver.
+ * *Flags: 1 snapshot taken (Original valid), 2 table was already the quiet one (nothing uploaded, Original not valid),
+ * 4 backup uploaded, 8 auto set. *DutyBefore and *DutyAfter 0..1024 (0xFFFF unread), *TempMilli MainSoC (0x0b) or -1. */
+typedef EFI_STATUS (EFIAPI *PS5_HDMI_VIDEO_FAN_QUIET)(UINT8 *Original,UINTN OriginalSize,UINT32 *Flags,UINT32 *DutyBefore,UINT32 *DutyAfter,INT32 *TempMilli);
 typedef struct { PS5_HDMI_VIDEO_STAGE Stage; PS5_HDMI_VIDEO_READ Read;
                  PS5_HDMI_VIDEO_GET_EDID GetEdid; PS5_HDMI_VIDEO_SET_MODE SetMode;
                  PS5_HDMI_VIDEO_FAN Fan;
-                 PS5_HDMI_VIDEO_DIAG_ICC DiagIcc; } PS5_HDMI_VIDEO_PROTOCOL;   /* r5.20: appended at the end */
+                 PS5_HDMI_VIDEO_DIAG_ICC DiagIcc;   /* r5.20: appended at the end */
+                 PS5_HDMI_VIDEO_FAN_QUIET FanQuiet; } PS5_HDMI_VIDEO_PROTOCOL;   /* r5.26.2: appended at the end */
 #endif

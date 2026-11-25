@@ -104,7 +104,7 @@
  }
  
  void trim_newline(char *s) {
-@@ -118,59 +96,170 @@
+@@ -118,59 +96,179 @@
    }
  }
  
@@ -201,7 +201,16 @@
 +        /* v1.0.5-beta.2: a firmware without the version string (builds from before v1.0, e.g. /data/1360uefi/ps5-upl.bin
 +         * of an early install) counts as older too - it has no restart support and was started instead of ours */
 +        long er = psw_fw_rev(tmp, tl), br = psw_fw_rev(_psw_upl_start, (size_t)(_psw_upl_end - _psw_upl_start));
-+        if (bv >= 0 && ev < bv) {
++        /* v1.1: the firmware revision orders every build since r5.25.13 ("PSWloader v1.1" no longer matches the v1.0.N
++         * pattern); an external firmware without revision or with a lower one is older than the built-in one */
++        if (br >= 0) {
++          if (er < br) {
++            if (er >= 0) notify("PSWloader: older firmware r%ld.%ld.%ld in %s ignored, using the built-in r%ld.%ld.%ld\n",
++                                er / 1000000, er / 1000 % 1000, er % 1000, initrd_path, br / 1000000, br / 1000 % 1000, br % 1000);
++            else notify("PSWloader: old firmware without revision in %s ignored, using the built-in one\n", initrd_path);
++            use_emb_upl = 1; use_emb_kernel = 1;
++          }
++        } else if (bv >= 0 && ev < bv) {
 +          if (ev >= 0) notify("PSWloader: older firmware v1.0.%d in %s ignored, using the built-in v1.0.%d\n", ev, initrd_path, bv);
 +          else notify("PSWloader: old firmware without version in %s ignored, using the built-in v1.0.%d\n", initrd_path, bv);
 +          use_emb_upl = 1; use_emb_kernel = 1;
@@ -312,7 +321,7 @@
  
    size_t vram_size;
    char buf_vram[16] = {};
-@@ -216,10 +305,10 @@
+@@ -216,10 +314,10 @@
          ALIGN_UP(initrd_size, PAGE_SIZE));
      if (staged) {
        if (staged == STAGING_REBOOT_FIRST_1160)
@@ -329,7 +338,7 @@
 +++ b/source/main.c
 @@ -1,3 +1,6 @@
 +#ifndef PSW_RELEASE_DATE
-+#define PSW_RELEASE_DATE "2026-11-24"
++#define PSW_RELEASE_DATE "2026-11-25"
 +#endif
  #include "hv_defeat_0304.h"
  #include "hv_defeat_0506.h"

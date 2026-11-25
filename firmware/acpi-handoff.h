@@ -13,4 +13,7 @@
 int ps5_add_acpi_handoff(const uint8_t *input, size_t size, const uint8_t *arena,
                          size_t arena_size, uint8_t *output, size_t capacity,
                          struct ps5_handoff_result *result);
+/* r5.26.7: rewrite the PCI0 _CRS memory windows of the DSDT in a (writable) arena to cut[] (ps5_pci_windows layout)
+ * and fix its checksum. 0 ok, -1 invalid arena/windows, -2 descriptors not found, -3 arena invalid afterwards. */
+int ps5_acpi_set_pci_windows(uint8_t *arena, size_t size, const uint64_t cut[6]);
 #endif

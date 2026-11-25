@@ -64,6 +64,7 @@ def prepare_windows_boot(root,implementation,setup_menu=False):
     (directory/'ps5-bcd.h').write_text((Path(__file__).parent/'ps5-bcd.h').read_text())   # r5.22 BCD testsigning
     (directory/'ps5-pstate-ssdt.h').write_text((Path(__file__).parent/'ps5-pstate-ssdt.h').read_text())   # r5.12
     (directory/'ps5-fan.h').write_text((Path(__file__).parent/'ps5-fan.h').read_text())   # r5.14
+    (directory/'ps5-fan-quiet.h').write_text((Path(__file__).parent/'ps5-fan-quiet.h').read_text())   # r5.26.4: GameOS fan table kept on the ESP
     for name in ('ps5-diag.h','ps5-diag-uefi.h','icc-power.h'):   # r5.20 BIOS system check
         (directory/name).write_text((Path(__file__).parent/name).read_text())
     (directory/'Ps5Diag.h').write_text((Path(__file__).parent/'Ps5PlatformPkg/Include/Ps5Diag.h').read_text())   # r5.20
@@ -74,6 +75,7 @@ def prepare_windows_boot(root,implementation,setup_menu=False):
 
 BOOT_SOURCE='MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c'
 SNAPSHOT_GUID='{0x873f7798,0xe801,0x4ec4,{0x86,0x97,0x30,0xb7,0xb3,0xa1,0xfa,0x52}}'
+PRE_BOOT_GUID='{0x96d4b2b8,0xc972,0x487b,{0x85,0x84,0x7a,0x2e,0x2c,0xe0,0x89,0x7b}}'   # r5.26.6, same as Ps5BootWindows.c
 
 def prepare_boot_snapshots(root):
     """Persist bounded boot-service milestones; no hooks in runtime services."""
@@ -83,7 +85,16 @@ def prepare_boot_snapshots(root):
     helper+='STATIC VOID Ps5BootSnapshot (UINT32 Phase, EFI_STATUS Status) {\n'
     helper+='  DEBUG ((DEBUG_INFO, "PS5 boot milestone %u: %r\\n", Phase, Status));\n'
     helper+='  EfiEventGroupSignal (&mPs5BootSnapshotGuid);\n}\n'
+    # r5.26.6: pre-boot hook of the PS5 boot path (Ps5BootWindows.c) - USB port power cycle for starts from the Boot Manager,
+    # called before ReadyToBoot at the caller's TPL (a ReadyToBoot notify at TPL_CALLBACK would stall USB enumeration)
+    helper+='STATIC EFI_GUID mPs5PreBootGuid='+PRE_BOOT_GUID+';\n'
+    helper+='typedef struct { UINT32 Revision; VOID (EFIAPI *PreBoot)(EFI_DEVICE_PATH_PROTOCOL *FilePath); } PS5_PRE_BOOT_PROTOCOL;\n'
+    helper+='STATIC VOID Ps5PreBoot (EFI_DEVICE_PATH_PROTOCOL *FilePath) {\n'
+    helper+='  PS5_PRE_BOOT_PROTOCOL *P = NULL;\n'
+    helper+='  if (!EFI_ERROR (gBS->LocateProtocol (&mPs5PreBootGuid, NULL, (VOID **)&P)) && (P != NULL) && (P->PreBoot != NULL)) {\n'
+    helper+='    P->PreBoot (FilePath);\n  }\n}\n'
     replacements=[(declaration,declaration+helper),
+      ('  } else {\n    EfiSignalEventReadyToBoot ();', '  } else {\n    Ps5PreBoot (BootOption->FilePath);\n    EfiSignalEventReadyToBoot ();'),
       ('    FileBuffer = BmGetNextLoadOptionBuffer', '    Ps5BootSnapshot (1, EFI_SUCCESS);\n    FileBuffer = BmGetNextLoadOptionBuffer'),
       ('    if (FileBuffer != NULL) {\n      RamDiskDevicePath', '    Ps5BootSnapshot (2, FileBuffer == NULL ? EFI_NOT_FOUND : EFI_SUCCESS);\n    if (FileBuffer != NULL) {\n      RamDiskDevicePath'),
       ('                      &ImageHandle\n                      );', '                      &ImageHandle\n                      );\n      Ps5BootSnapshot (3, Status);'),

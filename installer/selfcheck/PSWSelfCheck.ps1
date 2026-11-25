@@ -1,12 +1,12 @@
 <#
-PSWSelfCheck.ps1 v1.1 - collects everything support needs into one zip.
+PSWSelfCheck.ps1 v1.3 (v1.3: SetupComplete and specialize logs; v1.2: memory integrity / VBS state in the summary) - collects everything support needs into one zip.
 Writes C:\PSWloader\selfcheck\results\PSW-selfcheck-<yyyy-MM-dd_HH-mm-ss>.zip and opens the folder.
 Read-only on the system; the only change is a temporary drive letter for the EFI system partition (removed again).
 Run as administrator (PSWSelfCheck.cmd does that).
 #>
 param([switch]$NoExplorer)
 $ErrorActionPreference = 'Continue'
-$Ver = '1.1'
+$Ver = '1.2'
 $Stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $Base = 'C:\PSWloader\selfcheck\results'
 $Work = Join-Path $Base "PSW-selfcheck-$Stamp"
@@ -54,6 +54,7 @@ Step 'summary' {
     'ps5pwr'                = $(if ($pwr) { "$($pwr.Status) | driver $(& $drv $pwr)" } else { 'not found' })
     'devices not ok'        = $bad.Count
     'testsigning'           = ((bcdedit /enum '{current}' 2>$null | Select-String -Pattern 'testsigning') -join ' ').Trim()
+    'memory integrity'      = $(try { $g = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop; "VBS status $($g.VirtualizationBasedSecurityStatus), running $(@($g.SecurityServicesRunning) -join ',') (2 = HVCI on: PS5 drivers cannot load)" } catch { 'unknown' })
   }
   (@($s.Keys) | ForEach-Object { '{0,-22} {1}' -f $_, $s[$_] }) | Set-Content (Join-Path $Work 'summary.txt') -Encoding UTF8
 }
@@ -158,7 +159,8 @@ Step 'event logs' {
 Step 'setup logs and dumps' {
   $d = Join-Path $Work 'windows'
   foreach ($p in 'C:\Windows\INF\setupapi.dev.log', 'C:\Windows\INF\setupapi.setup.log', 'C:\Windows\Panther\setupact.log', 'C:\Windows\Panther\setuperr.log',
-                 'C:\Windows\Panther\UnattendGC\setupact.log', 'C:\Windows\debug\netsetup.log') { Copy-IfThere $p $d }
+                 'C:\Windows\Panther\UnattendGC\setupact.log', 'C:\Windows\debug\netsetup.log',
+                 'C:\Windows\Setup\Scripts\psw-setupcomplete.log', 'C:\Windows\Setup\Scripts\psw-specialize.log') { Copy-IfThere $p $d }   # v1.3: SetupComplete/specialize logs ("Just a moment..." hangs)
   Get-ChildItem 'C:\Windows\Minidump' -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 5 |
     ForEach-Object { Copy-IfThere $_.FullName (Join-Path $d 'minidump') }
   Get-ChildItem 'C:\Windows\LiveKernelReports' -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime |

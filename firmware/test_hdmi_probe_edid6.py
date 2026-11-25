@@ -170,7 +170,7 @@ int VarSize(const char *Name){CHAR16 W[32];int K=0;while(Name[K]&&K<31){W[K]=(CH
  for(int I=0;I<VarCount;I++)if(NameEq(Vars[I].Name,W))return (int)Vars[I].Size;return -1;}
 int VarByte(const char *Name,int Off){CHAR16 W[32];int K=0;while(Name[K]&&K<31){W[K]=(CHAR16)Name[K];K++;}W[K]=0;
  for(int I=0;I<VarCount;I++)if(NameEq(Vars[I].Name,W))return Vars[I].Data[Off];return -1;}
-int VarAttrOk(void){return SetCalls==2&&BadAttr==0;}
+int VarAttrOk(void){return SetCalls==3&&BadAttr==0;}   /* r5.26.5: + Ps5HdmiBridge */
 int Lines(int N){return N?DtdLines:HexLines;}
 void Push(int K){Queue[QTail++%16]=K;}
 void SetEndless(int V,int Drop){Endless=V;DropMode=Drop;}
@@ -248,7 +248,7 @@ class Edid5Tests(unittest.TestCase):
         self.entry(); self.lib.Push(0); self.lib.Push(1)
         self.run_phase()
         self.ok_context()
-        self.assertEqual((self.lib.Lines(0), self.lib.VarAttrOk()), (16, 1))        # 16 hex lines, 2x SetVariable BS|RT
+        self.assertEqual((self.lib.Lines(0), self.lib.VarAttrOk()), (16, 1))        # 16 hex lines, 3x SetVariable BS|RT (EDID, info, bridge)
         self.assertGreaterEqual(self.lib.Lines(1), 1)
         self.assertEqual(self.lib.VarSize(b'Ps5HdmiEdid'), 256)
         self.assertEqual(self.lib.VarSize(b'Ps5HdmiEdidInfo'), 64)

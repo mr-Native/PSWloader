@@ -30,7 +30,7 @@
 #include "../Include/Ps5PowerPreset.h"   /* r5.6 */
 
 #ifndef PS5_FIRMWARE_LABEL
-#define PS5_FIRMWARE_LABEL L"PSWloader v1.0.5"   /* r5.22: user-visible name PSWloader; r5.24: revision only under Advanced */
+#define PS5_FIRMWARE_LABEL L"PSWloader v1.1"   /* r5.22: user-visible name PSWloader; r5.24: revision only under Advanced */
 #endif
 #ifndef PS5_FIRMWARE_REV
 #define PS5_FIRMWARE_REV L"r5.25.2"

@@ -1,4 +1,11 @@
 /*
+ * ps5pwr v1.17.2 (24.11.2026): firmware r5.26.2 puts the quiet backup servo table on the EMC at power-on; the GameOS table
+ *       comes from the volatile variable PswFanOriginal and is restored at stop as before.
+ * ps5pwr v1.17.1 (24.11.2026): fan curve really starts (1.17.0 never read FanCurve); registry writes outside icc_lock.
+ * ps5pwr v1.17.0 (24.11.2026): PS5 Linux fan control 1:1 (drivers/ps5/fan.c, ps5pwr-fancurve.c): board EMC servo table,
+ *       quiet backup table, quiet curve 50..87 C -> PWM 26..255 every 500 ms with smoothing, slew limit, stop below 45 C
+ *       and emergency maximum at 90 C; original table + firmware auto at stop/S5/restart. Parameters\FanCurve 0 = off.
+ *       caps 0x2000.
  * ps5pwr v1.16.0 (19.11.2026): a restart (PowerActionShutdownReset) is left to Windows when the firmware publishes the
  *       volatile variable PswWarmReentry (PSWloader firmware r5.25.5+ with warm re-entry): no ICC reboot, the S5 IRP goes
  *       down normally and Windows restarts through the firmware's ResetSystem, which starts PSWloader again instead of
@@ -128,6 +135,7 @@
 #include "ps5pwr-sensors.h"
 #include "smu-mbox.h"
 #include "../../firmware/button-keys.h"
+#include "ps5pwr-fancurve.h"
 
 #define PS5PWR_TAG 'rwp5'
 #define DOORBELL_OFF 0x108000u
@@ -163,9 +171,9 @@ typedef struct { PS5PWR_GFXCLK_OUT b; ULONG query_mhz, freq_mhz; } PS5PWR_GFXCLK
 #define IOCTL_PS5PWR_VERSION CTL_CODE(0x8002, 0x90A, METHOD_BUFFERED, FILE_READ_ACCESS)   /* v1.12.1 = 0x80026428 */
 typedef struct { ULONG size, major, minor, patch, caps; } PS5PWR_VERSION_OUT;
 #define PS5PWR_VER_MAJOR 1u
-#define PS5PWR_VER_MINOR 16u
-#define PS5PWR_VER_PATCH 0u
-#define PS5PWR_CAPS (0x08u | 0x10u | 0x20u | 0x40u | 0x80u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u)   /* v1.16.0: 0x1000 warm restart left to the firmware */   /* v1.15.0: 0x400 op 21 boost window ceiling, 0x800 BAPM op 3 GFX CAC scale */   /* v1.14.0: 0x200 OC ops 7..20 */   /* v1.13: 0x100 hotplug pick + program */
+#define PS5PWR_VER_MINOR 17u
+#define PS5PWR_VER_PATCH 2u
+#define PS5PWR_CAPS (0x08u | 0x10u | 0x20u | 0x40u | 0x80u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u | 0x2000u)   /* v1.17.0: 0x2000 PS5 Linux fan curve in the driver */   /* v1.16.0: 0x1000 warm restart left to the firmware */   /* v1.15.0: 0x400 op 21 boost window ceiling, 0x800 BAPM op 3 GFX CAC scale */   /* v1.14.0: 0x200 OC ops 7..20 */   /* v1.13: 0x100 hotplug pick + program */
 #define IOCTL_PS5PWR_HP_PICK CTL_CODE(0x8002, 0x90D, METHOD_BUFFERED, FILE_READ_ACCESS)      /* v1.13 = 0x80026434 */
 #define IOCTL_PS5PWR_HP_PROGRAM CTL_CODE(0x8002, 0x90E, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* v1.13 = 0x8002a438 */
 typedef struct { LONG result; ULONG count, last_stage, mode_id; ULONG stages[PS5_HP_MAX_STAGES]; LONG results[PS5_HP_MAX_STAGES]; } PS5PWR_HP_PROGRAM_OUT;
@@ -232,6 +240,17 @@ typedef struct _EXT {
     /* v1.13 hotplug pick / program */
     KEVENT hp_seq;                        /* binary semaphore (signalled = free): one FLAVA3 stage sequence at a time */
     PKEVENT pick_event; HANDLE pick_handle;   /* \BaseNamedObjects\PswHotplug */
+    /* v1.17 PS5 Linux fan curve (thread + S5 path, always under icc_lock) */
+    ULONG fc_cfg, fc_tries, fc_errors, fc_ticks, fc_polls;
+    LONG fc_phase, fc_wire_mode, fc_last_temp;
+    BOOLEAN fc_original_ok, fc_fault;
+    ULONGLONG fc_retry_at;
+    struct ps5_fc_state fc;
+    KBUGCHECK_CALLBACK_RECORD fc_bug;
+    LONG fc_bug_reg;
+    UCHAR fc_original[PS5_FC_SERVO_SIZE], fc_backup[PS5_FC_SERVO_SIZE];
+    UCHAR fc_fw_original[PS5_FC_SERVO_SIZE]; BOOLEAN fc_fw_original_ok;   /* v1.17.2: PswFanOriginal (firmware r5.26.2+) */
+    UCHAR fc_req[4 + PS5_FC_SERVO_SIZE], fc_io[0x7e4];
 } EXT, *PEXT;
 static PDEVICE_OBJECT g_ctl;                     /* \\.\Ps5Pwr */
 static PEXT g_fdo_ext;                           /* the (single) started 9107 FDO */
@@ -959,6 +978,191 @@ static void btn_tick(PEXT e)
         }
     }
 }
+/* ---------------------------------------------------------------- v1.17 fan curve (PS5 Linux drivers/ps5/fan.c 1:1)
+ * Start: the board's EMC servo table (icc_fan_update_autoservo_param), snapshot of the servo table and zone modes, quiet
+ * backup table (EMC auto at a 50 C target if the host stops driving the fan). Every 500 ms: MainSoC temperature ->
+ * quiet curve -> manual duty, emergency maximum at 90 C. Stop/S5/restart: original table back, firmware auto.
+ * Switch: Parameters\FanCurve (DWORD, default 1; 0 = firmware auto, re-read every second). Caller holds icc_lock. */
+enum { FC_IDLE = 0, FC_RUNNING = 1, FC_FAILED = 2 };
+static NTSTATUS fc_msg(PEXT e, uint8_t svc, uint16_t type, const UCHAR *req, unsigned n, UCHAR *reply, unsigned rn, ULONG ms)
+{
+    unsigned got = 0;
+    int r = icc_query_robust_ms(e, svc, type, req, n, e->fc_io, sizeof(e->fc_io), &got, ms);
+    if (r) return icc_query_status(r);
+    if (got < 4) return STATUS_DATA_ERROR;                       /* PS5 Linux: length < 0x10 -> -EPROTO */
+    if (e->fc_io[0] | e->fc_io[1]) return STATUS_IO_DEVICE_ERROR;  /* service status */
+    if (rn) { if (got < rn) return STATUS_DATA_ERROR; RtlCopyMemory(reply, e->fc_io, rn); }
+    return STATUS_SUCCESS;
+}
+static NTSTATUS fc_read_temp(PEXT e, UCHAR zone, int *milli)
+{
+    UCHAR req[4] = { zone, 0, 0, 0 }, reply[4];
+    NTSTATUS st = fc_msg(e, PS5_FC_TEMP_SERVICE, 1, req, sizeof(req), reply, sizeof(reply), 2000);
+    if (NT_SUCCESS(st) && ps5_fc_decode_temp(reply, milli)) st = STATUS_DEVICE_DATA_ERROR;
+    return st;
+}
+static NTSTATUS fc_read_duty(PEXT e, unsigned *duty)
+{
+    UCHAR reply[4];
+    NTSTATUS st = fc_msg(e, PS5_FC_SERVICE, 1, NULL, 0, reply, sizeof(reply), 2000);
+    if (!NT_SUCCESS(st)) return st;
+    *duty = reply[2] | reply[3] << 8;
+    return *duty <= 1024 ? STATUS_SUCCESS : STATUS_DATA_ERROR;
+}
+static NTSTATUS fc_set_mode(PEXT e, int mode)
+{
+    UCHAR req[4] = { 0, (UCHAR)mode, 0, 0 };
+    if (e->fc_wire_mode == mode) return STATUS_SUCCESS;
+    NTSTATUS st = fc_msg(e, PS5_FC_SERVICE, 2, req, sizeof(req), NULL, 0, 2000);
+    if (NT_SUCCESS(st)) e->fc_wire_mode = mode;
+    return st;
+}
+static NTSTATUS fc_get_mode(PEXT e, UCHAR zone, UCHAR *mode)
+{
+    UCHAR req[4] = { zone, 0, 0, 0 }, reply[4];
+    NTSTATUS st = fc_msg(e, PS5_FC_SERVICE, 3, req, sizeof(req), reply, sizeof(reply), 2000);
+    if (NT_SUCCESS(st)) *mode = reply[2];
+    return st;
+}
+static NTSTATUS fc_write_pwm(PEXT e, unsigned pwm)
+{
+    UCHAR req[4] = { 0 };
+    unsigned duty = ps5_fc_pwm_to_duty(pwm);
+    NTSTATUS st = fc_set_mode(e, PS5_FC_MODE_MANUAL);
+    if (!NT_SUCCESS(st)) return st;
+    req[2] = (UCHAR)duty; req[3] = (UCHAR)(duty >> 8);
+    st = fc_msg(e, PS5_FC_SERVICE, 4, req, sizeof(req), NULL, 0, 2000);
+    if (NT_SUCCESS(st)) e->fc.requested_pwm = pwm;
+    return st;
+}
+static NTSTATUS fc_upload(PEXT e, const UCHAR *table)        /* icc_fan_update_param: service 0x0a type 0x0e */
+{
+    RtlZeroMemory(e->fc_req, 4);
+    RtlCopyMemory(e->fc_req + 4, table, PS5_FC_SERVO_SIZE);
+    return fc_msg(e, PS5_FC_SERVICE, 0x0e, e->fc_req, sizeof(e->fc_req), NULL, 0, 12000);
+}
+static void fc_fallback(PEXT e)
+{
+    e->fc_fault = TRUE; e->fc_wire_mode = -1;
+    (void)fc_set_mode(e, PS5_FC_MODE_AUTO);
+}
+static NTSTATUS fc_tick(PEXT e)                               /* ps5_fan_update_locked, automatic mode */
+{
+    int t = 0; unsigned pwm;
+    NTSTATUS st = fc_read_temp(e, 0, &t);
+    if (NT_SUCCESS(st)) {
+        e->fc_last_temp = t;
+        if (ps5_fc_step(&e->fc, t, &pwm) == PS5_FC_MODE_MAXIMUM) {
+            st = fc_set_mode(e, PS5_FC_MODE_MAXIMUM);
+            if (NT_SUCCESS(st)) e->fc.requested_pwm = 255;
+        } else st = fc_write_pwm(e, pwm);
+    }
+    if (NT_SUCCESS(st)) { e->fc_fault = FALSE; e->fc_ticks++; return st; }
+    if (e->fc_errors++ < 20) ps5_hp_log(e, "fan: control failed 0x%08lx; using firmware auto", st);
+    fc_fallback(e);
+    return st;
+}
+static VOID fc_bugcheck(PVOID buf, ULONG len)                /* HIGH_LEVEL: leave the fan to the EMC (backup table) */
+{
+    PEXT e = buf; struct ps5_icc_io io; const uint8_t req[4] = { 0, PS5_FC_MODE_AUTO, 0, 0 };
+    UNREFERENCED_PARAMETER(len);
+    if (!e || e->fc_phase != FC_RUNNING || !e->mbox || !e->bell || e->icc_owner) return;
+    icc_io(e, &io, 200);
+    (void)ps5_icc_query_events(&io, PS5_FC_SERVICE, 2, req, sizeof(req), NULL, 0, NULL, btn_drop, NULL);
+}
+/* PASSIVE, no lock: board/GDDR6 ids from the GameOS boot parameters (reserved, not Windows RAM) like PS5 Linux */
+static const uint8_t *fc_board(PEXT e)
+{
+    PHYSICAL_ADDRESS pa; pa.QuadPart = 0x9b000;
+    ULONG64 board = 0; USHORT gddr6 = 0; const char *name = "?";
+    PVOID va = MmMapIoSpaceEx(pa, 0x2000, PAGE_READONLY | PAGE_NOCACHE);
+    if (va) {
+        board = *(volatile ULONG64 *)((PUCHAR)va + 0x328); gddr6 = *(volatile USHORT *)((PUCHAR)va + 0x1184);
+        MmUnmapIoSpace(va, 0x2000);
+    }
+    const uint8_t *table = ps5_fc_board_table(board, gddr6, &name);
+    reg_set(L"FanBoardId", REG_QWORD, &board, sizeof(board));
+    { ULONG g = gddr6; reg_set(L"FanGddr6Id", REG_DWORD, &g, sizeof(g)); }
+    ps5_hp_log(e, "fan: board %s (id %016I64x gddr6 %04x), servo table %s", name, board, gddr6, table ? "found" : "not updated");
+    return table;
+}
+static NTSTATUS fc_start(PEXT e, const uint8_t *table)
+{
+    NTSTATUS st; int t; unsigned duty; UCHAR mode = 0;
+    if (table && !NT_SUCCESS(st = fc_upload(e, table))) { ps5_hp_log(e, "fan: EMC rejected board table 0x%08lx", st); return st; }
+    st = fc_read_temp(e, 0, &t);
+    if (!NT_SUCCESS(st)) { ps5_hp_log(e, "fan: MainSoC temperature unavailable 0x%08lx", st); return st; }
+    st = fc_msg(e, PS5_FC_SERVICE, 0x0f, NULL, 0, e->fc_req, sizeof(e->fc_req), 12000);   /* snapshot */
+    if (!NT_SUCCESS(st)) { ps5_hp_log(e, "fan: servo snapshot failed 0x%08lx", st); return st; }
+    RtlCopyMemory(e->fc_original, e->fc_req + 4, PS5_FC_SERVO_SIZE);
+    if (ps5_fc_quiet_left(e->fc_original) && e->fc_fw_original_ok) {   /* v1.17.2: the firmware set the quiet table */
+        RtlCopyMemory(e->fc_original, e->fc_fw_original, PS5_FC_SERVO_SIZE);
+        ps5_hp_log(e, "fan: quiet table set by the firmware, GameOS table from PswFanOriginal");
+    }
+    for (UCHAR zone = 0; zone < 4; zone++) {
+        st = fc_get_mode(e, zone, &mode);
+        if (!NT_SUCCESS(st) || mode == PS5_FC_MODE_AUTO) continue;
+        if (zone) { ps5_hp_log(e, "fan: zone %u in mode %u", zone, mode); return STATUS_DEVICE_BUSY; }
+        ps5_hp_log(e, "fan: MainSoC zone left in mode %u, returning it to auto", mode);
+        e->fc_wire_mode = -1;
+        st = fc_set_mode(e, PS5_FC_MODE_AUTO);
+        if (NT_SUCCESS(st)) st = fc_get_mode(e, 0, &mode);
+        if (NT_SUCCESS(st) && mode != PS5_FC_MODE_AUTO) st = STATUS_DEVICE_BUSY;
+        if (!NT_SUCCESS(st)) return st;
+    }
+    if (!NT_SUCCESS(st)) return st;
+    e->fc_original_ok = !ps5_fc_quiet_left(e->fc_original);
+    if (!e->fc_original_ok) ps5_hp_log(e, "fan: servo table already quiet (earlier run), not restoring it");
+    ps5_fc_prepare_backup(e->fc_backup, e->fc_original);
+    st = fc_upload(e, e->fc_backup);
+    if (!NT_SUCCESS(st)) { (void)fc_upload(e, e->fc_original); ps5_hp_log(e, "fan: backup table rejected 0x%08lx", st); return st; }
+    st = fc_read_duty(e, &duty);
+    if (!NT_SUCCESS(st)) return st;
+    ps5_fc_init(&e->fc, ps5_fc_duty_to_pwm(e->fc_original[2] | e->fc_original[3] << 8), ps5_fc_duty_to_pwm(duty));
+    e->fc_phase = FC_RUNNING;
+    if (!e->fc_bug_reg) e->fc_bug_reg = KeRegisterBugCheckCallback(&e->fc_bug, fc_bugcheck, e, sizeof(*e), (PUCHAR)"ps5pwr-fan");
+    ps5_hp_log(e, "fan: quiet curve on, MainSoC %d mC, duty %u", t, duty);
+    return fc_tick(e);
+}
+static void fc_stop_locked(PEXT e, const char *why)
+{
+    if (e->fc_phase != FC_RUNNING) return;
+    e->fc_phase = FC_IDLE;
+    NTSTATUS st = e->fc_original_ok ? fc_upload(e, e->fc_original) : STATUS_SUCCESS;
+    e->fc_wire_mode = -1;
+    NTSTATUS st2 = fc_set_mode(e, PS5_FC_MODE_AUTO);
+    ps5_hp_log(e, "fan: curve off (%s): table 0x%08lx, auto 0x%08lx", why, st, st2);
+}
+static void fc_stop(PEXT e, const char *why)
+{
+    if (e->fc_phase != FC_RUNNING || !e->mbox) return;
+    icc_acquire(e); fc_stop_locked(e, why); icc_release(e);
+}
+static void fc_service(PEXT e)                               /* hotplug thread, every 500 ms */
+{
+    if (!(e->fc_polls++ & 1)) e->fc_cfg = reg_dword(L"FanCurve", 1) ? 1 : 0;   /* once per second */
+    if (e->btn_sx) return;                                    /* leaving S0: dispatch_power restored the table */
+    if (!e->fc_cfg) { fc_stop(e, "FanCurve 0"); e->fc_tries = 0; return; }
+    if (e->fc_phase == FC_RUNNING) { icc_acquire(e); (void)fc_tick(e); icc_release(e); return; }
+    if (e->fc_tries >= 3 || now_ms() < e->fc_retry_at) return;
+    const uint8_t *table = fc_board(e);
+    if (!e->fc_fw_original_ok) {   /* v1.17.2: PASSIVE, outside icc_lock */
+        ULONG l = PS5_FC_SERVO_SIZE;
+        NTSTATUS vs = fw_var(L"PswFanOriginal", e->fc_fw_original, &l);
+        e->fc_fw_original_ok = NT_SUCCESS(vs) && l == PS5_FC_SERVO_SIZE && !ps5_fc_quiet_left(e->fc_fw_original);
+    }
+    icc_acquire(e);
+    e->fc_wire_mode = -1;
+    NTSTATUS st = fc_start(e, table);
+    if (!NT_SUCCESS(st) && e->fc_phase != FC_RUNNING) {
+        e->fc_phase = FC_FAILED; e->fc_wire_mode = -1; (void)fc_set_mode(e, PS5_FC_MODE_AUTO);
+        e->fc_tries++; e->fc_retry_at = now_ms() + 30000;
+        ps5_hp_log(e, "fan: curve start failed 0x%08lx (try %lu of 3), firmware auto", st, e->fc_tries);
+    }
+    icc_release(e);
+    { ULONG v = (ULONG)e->fc_phase; reg_set(L"FanCurveState", REG_DWORD, &v, sizeof(v)); }
+}
+
 static VOID hp_thread(PVOID ctx)
 {
     PEXT e = ctx; ULONG tick = 0, tries = 0; ULONGLONG retry_at = 0;
@@ -987,10 +1191,12 @@ static VOID hp_thread(PVOID ctx)
         }
         if (e->hp_state == HP_ARMED) hp_tick(e);
         if (e->btn_on) btn_tick(e);                      /* v1.10 */
+        if (tick & 1) fc_service(e);                     /* v1.17: fan curve every 500 ms */
         period.QuadPart = -10LL * 1000 * HP_TICK_MS;     /* v1.10: always 250 ms (was 1 s while not armed) */
         KeWaitForSingleObject(&e->hp_wake, Executive, KernelMode, FALSE, &period);
     }
     btn_off(e, "thread stops");                          /* v1.10: stop/remove/unload/S5 - mbox still mapped here */
+    fc_stop(e, "thread stops");                          /* v1.17: original servo table + firmware auto */
     ps5_hp_log(e, "hotplug: thread stops");
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
@@ -1057,6 +1263,7 @@ static NTSTATUS dispatch_pnp(PDEVICE_OBJECT d, PIRP irp)
         hp_halt(e);                                    /* v1.10: the thread switches the button off on its way out */
         btn_off(e, "remove");
         if (e->btn_bug_reg) { KeDeregisterBugCheckCallback(&e->btn_bug); e->btn_bug_reg = 0; }
+        if (e->fc_bug_reg) { KeDeregisterBugCheckCallback(&e->fc_bug); e->fc_bug_reg = 0; }   /* v1.17 */
         btn_event_close(e);
         pick_event_close(e);   /* v1.13 */
         if (g_fdo_ext == e) g_fdo_ext = NULL;
@@ -1106,8 +1313,10 @@ static NTSTATUS dispatch_power(PDEVICE_OBJECT d, PIRP irp)
         if (s->Parameters.Power.State.SystemState == PowerSystemWorking) InterlockedExchange(&e->btn_sx, 0);
         else {
             InterlockedExchange(&e->btn_sx, 1);
-            if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+            if (KeGetCurrentIrql() == PASSIVE_LEVEL) {
                 btn_off(e, s->Parameters.Power.State.SystemState == PowerSystemShutdown ? "S5" : "Sx");
+                fc_stop(e, s->Parameters.Power.State.SystemState == PowerSystemShutdown ? "S5" : "Sx");   /* v1.17 */
+            }
         }
     }
     if (s->MinorFunction == IRP_MN_SET_POWER && s->Parameters.Power.Type == SystemPowerState &&
@@ -1205,6 +1414,7 @@ static NTSTATUS dispatch_ctl(PDEVICE_OBJECT d, PIRP irp)
                 return complete(irp, STATUS_INVALID_PARAMETER, 0);
             target = *(ULONG *)irp->AssociatedIrp.SystemBuffer;
             if (target < 50 || target > 100) return complete(irp, STATUS_INVALID_PARAMETER, 0);   /* v1.8.2: 50 = PS5 Linux quiet servo TARGETTEMP (50<<8) */
+            if (e->fc_phase == FC_RUNNING) return complete(irp, STATUS_DEVICE_BUSY, 0);   /* v1.17: the fan curve drives the fan */
         }
         RtlZeroMemory(o, sizeof(*o));
         ULONG reply_bytes = 0;

@@ -1,5 +1,5 @@
 @echo off
-rem psw-drivers.cmd v2.4 (PSWloader v1.0; v2.4: logs of the last 10 Setup starts in PSW\logs; v2.3: psw-wim.cmd in the background - removes the corner text in the stick's boot.wim for every
+rem psw-drivers.cmd v2.5 (PSWloader v1.0; v2.5: welcome line, status lines and a clear hint when test signing was off (issue #9: no disks); v2.4: logs of the last 10 Setup starts in PSW\logs; v2.3: psw-wim.cmd in the background - removes the corner text in the stick's boot.wim for every
 rem later start (Windows PE reads it before any script); v2.2: pswsvc v1.8 hidetestmode first - hides the "Test Mode" text in Windows Setup's screen corner (RAM copy of
 rem shell32.dll.mui only); v2.1: pswsvc v1.7 keepawake keeps the setup stick awake in the background (Setup stalled at its first
 rem read of install.swm after the stick had idled in the dialogs - USB selective suspend, powercfg has no effect here); v2.0: TRIM off for this Windows Setup session - with pswdisk reporting a USB SSD as SATA, Windows
@@ -16,9 +16,16 @@ rem the internal M.2. v1.1: copies the drivers to X:\PSWDRV (offlineServicing Dr
 rem reports USB disks as internal SATA disks, so Windows Setup accepts a USB SSD as target. Changes nothing on any disk. Needs test signing in the stick's boot entry (set by PSWloader
 rem firmware r5.22+ before Windows Boot Manager starts). Log: X:\psw-drivers.log, copied to PSW\psw-drivers.log.
 setlocal enabledelayedexpansion
+rem v2.5: the window shows who it is and what happens (it used to stay empty, users could not tell whether it hung)
+set "PSWVER=v1.1"
+title PSWloader %PSWVER% - Windows Setup
+echo.
+echo   Welcome to PSWloader %PSWVER%
+echo.
+echo   Loading the PS5 drivers for Windows Setup ...
 set "SRC=%~d0"
 set "LOG=X:\psw-drivers.log"
-echo psw-drivers v2.4 src=%SRC% > %LOG%
+echo psw-drivers v2.5 src=%SRC% > %LOG%
 rem v2.4: the logs of the last 10 Setup starts are kept in PSW\logs\psw-drivers-N.log (a failed start used to be
 rem overwritten by the next one, for example after a restart)
 if not exist "%SRC%\PSW\logs" md "%SRC%\PSW\logs" > nul 2>&1
@@ -66,6 +73,11 @@ if exist "%SRC%\PSW\pswsvc.exe" if exist "%SRC%\PSW\drivers\ps5nvmsi\ps5nvmsi.sy
   )
   if "!NVRC!"=="577" (
     echo TESTSIGNING is OFF in WinPE - enabling testsigning in stick BCD for next boot >> %LOG%
+    echo.
+    echo   Test signing was off in this start, so Windows Setup cannot see the disks yet.
+    echo   It is switched on now. Close Windows Setup with X and confirm: the console
+    echo   restarts into Windows Setup, and the disks are there.
+    echo.
     for %%B in ("%SRC%\efi\microsoft\boot\bcd" "%SRC%\boot\bcd") do if exist %%B (
       bcdedit /store %%B /set {default} testsigning on >> %LOG% 2>&1
       echo bcdedit %%B exit !ERRORLEVEL! >> %LOG%
@@ -99,6 +111,7 @@ if exist X:\PSWDRV\pswdisk\pswdisk.sys (
     start "" /b "%SRC%\PSW\pswsvc.exe" keepawake !STICKDISK! > nul 2>&1
     echo keepawake started for disk !STICKDISK! >> %LOG%
   ) else echo setup stick disk not found - all USB disks are reported as internal >> %LOG%
+  echo   Preparing the USB disks ...
   "%SRC%\PSW\pswsvc.exe" start pswdisk X:\PSWDRV\pswdisk\pswdisk.sys >> %LOG% 2>&1
   echo pswsvc start pswdisk exit !ERRORLEVEL! >> %LOG%
   rem v1.6: the stick detection above already started the Virtual Disk Service, which keeps the bus type it read before
@@ -114,7 +127,30 @@ rem disk on an empty card reader can block
 copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1 & copy /y %LOG% "!HIST!" > nul 2>&1
 (echo list disk& echo list volume) > X:\psw-ld.txt
 diskpart /s X:\psw-ld.txt >> %LOG% 2>&1
+rem v2.5 (issue #10): the target must be a second disk - Windows cannot be installed onto the drive Setup runs from,
+rem and that drive stays a USB disk for Setup. Count the other disks of 1 GB or more ("Disk N  Online  476 GB": same
+rem columns in every language, units are not translated) and say so in the window when there is none.
+(echo list disk) > X:\psw-ld2.txt
+diskpart /s X:\psw-ld2.txt > X:\psw-ld2.out 2>&1
+set "OTHER=0"
+for /f "usebackq tokens=1-5" %%a in ("X:\psw-ld2.out") do (
+  set "DN=%%b" & set /a "DNUM=DN" 2> nul
+  if "!DNUM!"=="!DN!" if not "!DN!"=="!STICKDISK!" if /i "%%e"=="GB" set /a OTHER+=1
+  if "!DNUM!"=="!DN!" if not "!DN!"=="!STICKDISK!" if /i "%%e"=="TB" set /a OTHER+=1
+)
+echo other disks of 1 GB or more: !OTHER! >> %LOG%
+rem the diskpart call above started the Virtual Disk Service again - stop it as after pswdisk (v1.6), so it does not
+rem keep polling the disks while Windows Setup copies the files
+if exist "%SRC%\PSW\pswsvc.exe" "%SRC%\PSW\pswsvc.exe" stop vds >> %LOG% 2>&1
+if defined STICKDISK if "!OTHER!"=="0" (
+  echo.
+  echo   Only the installer drive was found. Windows cannot be installed onto the drive
+  echo   it starts from. Plug in a second drive ^(USB SSD/HDD or the internal M.2^),
+  echo   then click Refresh in the Windows Setup window.
+  echo.
+)
 rem v2.3: corner text out of the stick's boot.wim (first start only; background, Setup does not wait)
 if exist "%SRC%\PSW\psw-wim.cmd" if not exist "%SRC%\PSW\watermark-patched.txt" start "" /b cmd /c "%SRC%\PSW\psw-wim.cmd" > nul 2>&1
 copy /y %LOG% "%SRC%\PSW\psw-drivers.log" > nul 2>&1 & copy /y %LOG% "!HIST!" > nul 2>&1
+if "!NVRC!"=="577" ( echo   Restart needed - see above. ) else if defined STICKDISK if "!OTHER!"=="0" ( echo   Plug in a second drive - see above. ) else ( echo   Ready - go on in the Windows Setup window. This window can stay open. )
 exit /b 0

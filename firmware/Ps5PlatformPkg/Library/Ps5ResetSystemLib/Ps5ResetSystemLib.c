@@ -489,6 +489,33 @@ STATIC BOOLEAN WarmContainerOk (UINT64 A, UINT64 Limit, UINT64 *Bytes, UINT64 *E
   *Bytes = B; *Entry = *(CONST UINT64 *)(H + 32);
   return TRUE;
 }
+/* r5.26.3 (HW 24.11.: the restart into the updated r5.26.2 hung before the picture, 185 W): the bootstrap's HOB list
+ * carries the firmware volumes of the image it started (GUID HOB 15a5baf6-..., the PS5UPL01 header records at +48). A
+ * re-entry copied that list unchanged, so an updated image with another layout (r5.26.2 is 12 KiB larger) got the old FV
+ * base/size and the DXE core stopped. The records are rewritten from the container that is started; a different FV count
+ * cannot be patched in place (FALSE: keep the current image). r5.26.0 -> r5.26.1 worked only because both had the same size. */
+STATIC BOOLEAN WarmPatchFvHob (UINT8 *Hobs, UINTN HobLen, UINT64 Container) {
+  STATIC CONST UINT8 Guid[16] = {0xf6,0xba,0xa5,0x15,0x91,0x1c,0x7d,0x46,0x9d,0xfb,0x31,0x9d,0x17,0x8d,0x4b,0xb4};
+  CONST UINT8 *H = (CONST UINT8 *)(UINTN)Container;
+  UINT32 Count = *(CONST UINT32 *)(H + 40);
+  if (Count == 0 || Count > 8) return FALSE;
+  for (UINTN Off = 0; Off + 8 <= HobLen; ) {
+    UINT16 Type = *(UINT16 *)(Hobs + Off), Len = *(UINT16 *)(Hobs + Off + 2);
+    if (Len < 8 || Type == 0xFFFF) break;
+    if (Type == 4 && Len >= 32 && CompareMem (Hobs + Off + 8, Guid, 16) == 0) {
+      UINT32 Have = *(UINT32 *)(Hobs + Off + 28);
+      if (Have != Count || Len < 32 + Count * 32) {
+        DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: FV count %u in the HOBs, %u in the container - not switched\n", Have, Count));
+        return FALSE;
+      }
+      CopyMem (Hobs + Off + 32, H + 48, Count * 32);
+      return TRUE;
+    }
+    Off += Len;
+  }
+  DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: no FV HOB found - not switched\n"));
+  return FALSE;
+}
 STATIC VOID WarmPrepare (VOID) {
   *(volatile UINT64 *)(UINTN)0x1118061A0ULL = 0;   /* r5.25.5: no stale "cold restart" request from an earlier run */
   /* 1. untouched firmware container in the reserved arena; r5.25.13: an updated firmware that is running now first */
@@ -532,6 +559,7 @@ STATIC VOID WarmPrepare (VOID) {
     DEBUG ((DEBUG_ERROR, "PS5 warm re-entry: no memory for the copies\n")); return;
   }
   CopyMem (Save, Hob, HobLen);
+  if (!WarmPatchFvHob (Save, HobLen, Src)) return;   /* r5.26.3: FV records of the image a restart starts */
   if (AcpiLen) CopyMem (Save + EFI_PAGES_TO_SIZE (EFI_SIZE_TO_PAGES (HobLen)), (VOID *)(UINTN)PS5W_ACPI_BASE, (UINTN)AcpiLen);
   ZeroMem (Tables, EFI_PAGES_TO_SIZE (5));
   *(volatile UINT64 *)(UINTN)(PS5W_FIXED + 0x6000) = 0;   /* lab square marker off for normal boots */
@@ -689,9 +717,10 @@ STATIC VOID WarmReentry (VOID) {
   WarmReadOsRequest ((PS5_WARM_PARAMS *)(UINTN)(mWarmVa + mWarmParOff));
   if (!mWarmEbs) {   /* r5.25.13: the BDS asked to start an updated firmware (before EBS only, the arena is mapped 1:1 then) */
     volatile UINT64 *U = (volatile UINT64 *)(UINTN)PS5W_UPD_CELL; UINT64 B = 0, E = 0;
+    PS5_WARM_PARAMS *P = (PS5_WARM_PARAMS *)(UINTN)(mWarmVa + mWarmParOff);
     if (U[0] == 0x3154445055575350ULL && U[3] == 1 && U[1] == PS5W_UPD_IMAGE &&
-        WarmContainerOk (PS5W_UPD_IMAGE, PS5W_UPD_IMAGE + PS5W_UPD_MAX, &B, &E)) {
-      PS5_WARM_PARAMS *P = (PS5_WARM_PARAMS *)(UINTN)(mWarmVa + mWarmParOff);
+        WarmContainerOk (PS5W_UPD_IMAGE, PS5W_UPD_IMAGE + PS5W_UPD_MAX, &B, &E) &&
+        WarmPatchFvHob ((UINT8 *)(UINTN)P->HobSrc, (UINTN)P->HobLen, PS5W_UPD_IMAGE)) {   /* r5.26.3 */
       P->ImgSrc = PS5W_UPD_IMAGE + 4096; P->ImgLen = B; P->Entry = E;
       P->NextFlags = (1ULL << 48) | 4;   /* bit 2: an update run - the new firmware starts like after power-on */
       U[3] = 2;

@@ -159,9 +159,22 @@ class CliIoctlPath(unittest.TestCase):
 
     def test_driver_uses_shared_table_and_version_constants(self):
         self.assertIn('ps5_smu_oc_decode(in->op, in->mhz, &arg, &queue)', DRV)
-        self.assertIn('#define PS5PWR_VER_MINOR 16u', DRV)
-        self.assertIn('#define PS5PWR_VER_PATCH 0u', DRV)
-        self.assertIn('DriverVer   = 11/19/2026,1.16.0.0', (HERE / 'ps5pwr.inf').read_text())
+        self.assertIn('#define PS5PWR_VER_MINOR 17u', DRV)
+        self.assertIn('#define PS5PWR_VER_PATCH 2u', DRV)
+        self.assertIn('DriverVer   = 11/24/2026,1.17.2.0', (HERE / 'ps5pwr.inf').read_text())
+        # v1.17.0: PS5 Linux fan curve in the driver (caps 0x2000), switched by Parameters\FanCurve
+        self.assertIn('0x2000u)', DRV)
+        self.assertIn('reg_dword(L"FanCurve", 1)', DRV)
+        # v1.17.1: fc_service runs on the ticks where it reads FanCurve itself (1.17.0 never read it), and no
+        # registry write happens while icc_lock (a FAST_MUTEX, APC_LEVEL) is held
+        self.assertIn('if (tick & 1) fc_service(e);', DRV)
+        body = DRV[DRV.index('static NTSTATUS fc_start('):DRV.index('static void fc_stop_locked(')]
+        self.assertNotIn('reg_set(', body)
+        # v1.17.2: the firmware's GameOS table (PswFanOriginal) is read at PASSIVE outside icc_lock and only used when the
+        # snapshot already holds the quiet table
+        self.assertNotIn('fw_var(', body)
+        self.assertIn('fw_var(L"PswFanOriginal"', DRV)
+        self.assertIn('ps5_fc_quiet_left(e->fc_original) && e->fc_fw_original_ok', body)
         # v1.16.0: a restart is left to the firmware's ResetSystem (warm re-entry) when it publishes PswWarmReentry
         self.assertIn('fw_var(L"PswWarmReentry"', DRV)
         self.assertIn('return PoCallDriver(e->lower, irp);\n        }\n        NTSTATUS st = forward_sync', DRV)

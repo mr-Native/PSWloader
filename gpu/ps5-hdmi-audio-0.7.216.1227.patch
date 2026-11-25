@@ -1,0 +1,68 @@
+# PSWloader v1.1 GPU driver 0.7.216.1227: HDMI audio on the PS5 (DP audio on, audio N by bridge type).
+# Against the port source of 0.7.216.1226 (bc250kmd.sys .text dff29a06, rebuilt bit-identical); build with
+# BC250_PS5_STAGE=5 BC250_PS5_MMIO_KEEP=1 and KMD_EXTRA_DEFS=/DBC250_PS5_DPAUDIO=1. License: see LICENSE.md (PolyForm Noncommercial).
+diff -ru a/driver/kmd/dpaudio_seq.c b/driver/kmd/dpaudio_seq.c
+--- a/driver/kmd/dpaudio_seq.c	2026-11-14 17:36:16.929559616 +0100
++++ b/driver/kmd/dpaudio_seq.c	2026-11-24 23:32:38.231069309 +0100
+@@ -689,17 +689,12 @@
+ 
+ // Linux's values (dcn10_stream_encoder.c:1055-1056, enc1_se_setup_dp_audio): the default Maud/N of the ATP, and the
+ // timestamp mode in which the encoder computes the audio timestamps itself.
+-#if defined(BC250_PS5)
+-// PS5 (UNTESTED): the DP sink is the FLAVA3 DP->HDMI bridge, not a monitor. PS5 Linux replaces the default with
+-// getHdmiDpAudioN() in enc1_se_setup_dp_audio: "FLAVA3 audio is choppy with the default Naud, Maud is too coarse"
+-// -> 0x80000 for FLAVA3, the default for VERDE (ref-ps5-linux-image linux.patch 4613-4628 and 12302-12310). The
+-// UEFI firmware drives FLAVA3 only (flava3-prepare.c refuses converter != 2), so the PS5 build takes 0x80000. At
+-// HBR3 and 48 kHz DP0_DP_SEC_AUD_M_READBACK should then read about 15900 instead of about 990 (Maud/Naud =
+-// 512 fs / f_LS), a register-side witness that the ATP runs. The field is 24 bits (DP_SEC_AUD_N_MASK 0x00FFFFFF).
+-#define AUD_N_DEFAULT 0x80000ul
+-#else
+-#define AUD_N_DEFAULT 0x8000ul
+-#endif
++// PS5 (PSWloader v1.1, 24.11.2026): the DP sink is the console's DP->HDMI bridge, not a monitor. PS5 Linux replaces the
++// default with getHdmiDpAudioN() in enc1_se_setup_dp_audio: "FLAVA3 audio is choppy with the default Naud, Maud is too
++// coarse" -> 0x80000 for FLAVA3, the default for VERDE (ref-ps5-linux-image linux.patch 4613-4628 and 12302-12310). The
++// bridge type comes from the firmware (volatile variable Ps5HdmiBridge, modeset.c); without it the default stays.
++unsigned long g_Bc250DpAudioN = 0x8000ul;
++#define AUD_N_DEFAULT g_Bc250DpAudioN
+ #define TIMESTAMP_AUTO_CALC 1ul
+ // speakers_to_channels (dcn10_stream_encoder.c:1129-1161) for the fixed FL/FR allocation of step 1: FL and FR, the
+ // two lowest channel bits.
+diff -ru a/driver/kmd/dpaudio_seq.h b/driver/kmd/dpaudio_seq.h
+--- a/driver/kmd/dpaudio_seq.h	2026-11-08 10:56:10.000000000 +0100
++++ b/driver/kmd/dpaudio_seq.h	2026-11-24 23:32:38.231069309 +0100
+@@ -21,6 +21,8 @@
+ 
+ // What unit A measured under Linux (facts M819, evidence/linux/2026-10-07-L1007-dp-audio): the codec's vendor and
+ // device, its revision, and the pin configuration default both of its pins report. Values, not offsets.
++// The DP audio N of the stream (DP_SEC_AUD_N): 0x8000 like Linux, 0x80000 behind the PS5 FLAVA3 bridge (dpaudio_seq.c).
++extern unsigned long g_Bc250DpAudioN;
+ #define BC250_DPAUDIO_CODEC_ID 0x1002AA01ul
+ #define BC250_DPAUDIO_CODEC_REVISION 0x00100700ul
+ #define BC250_DPAUDIO_CONFIG_DEFAULT 0x185600F0ul
+diff -ru a/driver/kmd/modeset.c b/driver/kmd/modeset.c
+--- a/driver/kmd/modeset.c	2026-11-17 23:59:27.627001251 +0100
++++ b/driver/kmd/modeset.c	2026-11-24 23:32:51.215193331 +0100
+@@ -13,6 +13,7 @@
+ // the CatalogId, and a KMD image of another catalog fails DriverStateInit over the installed package (guard.c).
+ #include "bc250kmd.h"
+ #include "dpaux.h"
++#include "dpaudio_seq.h"   // PSWloader v1.1: g_Bc250DpAudioN (DP audio N by bridge type)
+ #include "../shim/bc250_dp_train.h"
+ #include "dcn_2_0_1_sh_mask.h"
+ #include <ntstrsafe.h>
+@@ -683,6 +684,14 @@
+                                                          &ps5EdidAttributes);
+         if (!NT_SUCCESS(ps5EdidStatus)) ps5EdidLength = 0;
+     }
++    {   // PSWloader v1.1: the bridge type for the DP audio N (dpaudio_seq.c g_Bc250DpAudioN): firmware r5.26.5+ publishes
++        // Ps5HdmiBridge (1 byte, ICC hdmi config converter: 2 FLAVA3, 3 VERDE) beside Ps5HdmiEdid. Absent: Linux's default.
++        UNICODE_STRING bname; UCHAR bridge = 0; ULONG blen = sizeof(bridge), battr = 0;
++        RtlInitUnicodeString(&bname, L"Ps5HdmiBridge");
++        NTSTATUS bst = ExGetFirmwareEnvironmentVariable(&bname, (LPGUID)&g_Ps5EdidGuid, &bridge, &blen, &battr);
++        g_Bc250DpAudioN = (NT_SUCCESS(bst) && blen == 1 && bridge == 2) ? 0x80000ul : 0x8000ul;
++        GuardLog("dpaudio: bridge %u (Ps5HdmiBridge 0x%08lX), DP audio N 0x%lX", (UINT)bridge, (ULONG)bst, g_Bc250DpAudioN);
++    }
+     // The HDMI audio path (dpaudio.c) builds its ELD from ModesetEdidForAudio. It was tested with the fixed 2ch set
+     // (no EDID); the sink's SADs are a change of their own, behind their own switch (BUILD.md, item 6).
+     BOOLEAN ps5EdidAudio = GuardReadSetting(L"Ps5EdidForAudio", 0) == 1;

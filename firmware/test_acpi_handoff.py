@@ -85,4 +85,49 @@ class AcpiHandoffTests(unittest.TestCase):
                 struct.pack_into('<I',data,off+40,10);break
         self.assertEqual(self.run_handoff(bytes(data),r,arena)[0],-3)
 
+    # ---- r5.26.7: the DSDT PCI0 windows follow the root ports ----
+    def crs_arena(self):
+        from test_acpi_candidate import m
+        body=bytearray()
+        body+=bytes([0x87,0x17,0,0,0x0c,0x01])+struct.pack('<IIIII',0,0x80000000,0xc43fffff,0,0x44400000)
+        body+=bytes([0x87,0x17,0,0,0x0c,0x01])+struct.pack('<IIIII',0,0xd0000000,0xe06fffff,0,0x10700000)
+        body+=bytes([0x8a,0x2b,0,0,0x0c,0x03])+struct.pack('<QQQQQ',0,0x980000000,0x99fffffff,0,0x20000000)
+        body+=bytes([0x79,0])
+        dsdt=m.header(b'DSDT',36+len(body)+16,2);dsdt[36:36+len(body)]=body
+        tables={n:m.header(n.encode(),sz,r) for n,sz,r in [('FACP',276,6),('APIC',52,3),('MCFG',60,1)]}
+        tables['DSDT']=dsdt
+        struct.pack_into('<I',tables['FACP'],112,1<<20)
+        struct.pack_into('<I',tables['APIC'],36,0xfee00000)
+        tables['APIC'][44:52]=b'\0\x08\0\0\x01\0\0\0'
+        struct.pack_into('<QHBBI',tables['MCFG'],44,0xf0000000,0,0,127,0)
+        arena,layout=m.assemble({n:bytes(m.checksum(t)) for n,t in tables.items()},0x40200000)
+        return bytes(arena),layout['addresses']['DSDT']-0x40200000
+    def set_windows(self,arena,cut):
+        f=self.lib.ps5_acpi_set_pci_windows;f.argtypes=[C.c_void_p,C.c_size_t,C.POINTER(C.c_uint64*6)]
+        buf=C.create_string_buffer(arena,len(arena));c=(C.c_uint64*6)(*cut)
+        return f(buf,len(arena),C.byref(c)),buf.raw[:len(arena)]
+    def test_13_60_windows_leave_the_arena_byte_identical(self):
+        arena,_=self.crs_arena()
+        self.assertEqual(self.set_windows(arena,(0x80000000,0xc4400000,0xd0000000,0xe0700000,0x980000000,0x9a0000000)),(0,arena))
+    def test_moved_windows_rewrite_crs_and_checksum(self):
+        arena,d=self.crs_arena()
+        status,out=self.set_windows(arena,(0x90000000,0xa8000000,0xb0000000,0xc0000000,0x1000000000,0x1100000000))
+        self.assertEqual(status,0)
+        body=d+36
+        self.assertEqual(struct.unpack_from('<III',out,body+10),(0x90000000,0xa7ffffff,0))
+        self.assertEqual(struct.unpack_from('<I',out,body+22)[0],0x18000000)
+        self.assertEqual(struct.unpack_from('<III',out,body+26+10),(0xb0000000,0xbfffffff,0))
+        self.assertEqual(struct.unpack_from('<QQ',out,body+52+14),(0x1000000000,0x10ffffffff))
+        self.assertEqual(struct.unpack_from('<Q',out,body+52+38)[0],0x100000000)
+        length=struct.unpack_from('<I',out,d+4)[0];self.assertEqual(sum(out[d:d+length])&255,0)
+        v=self.lib.ps5_validate_acpi;v.argtypes=[C.c_void_p,C.c_size_t,C.c_uint64]
+        self.assertEqual(v(C.create_string_buffer(out),len(out),0x40200000),0)
+    def test_missing_descriptors_and_bad_windows_are_refused(self):
+        arena,_=validator.AcpiValidatorTests().fixture()
+        self.assertEqual(self.set_windows(bytes(arena),(0x80000000,0xc4400000,0xd0000000,0xe0700000,0x980000000,0x9a0000000))[0],-2)
+        good,_=self.crs_arena()
+        for cut in ((0xc4400000,0x80000000,0xd0000000,0xe0700000,0x980000000,0x9a0000000),
+                    (0x80000000,0xc4400000,0xd0000000,0x100100000,0x980000000,0x9a0000000)):
+            self.assertEqual(self.set_windows(good,cut)[0],-1)
+
 if __name__=='__main__':unittest.main()

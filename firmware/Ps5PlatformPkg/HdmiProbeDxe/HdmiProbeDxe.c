@@ -27,6 +27,7 @@
 #include "verde-video.h"
 #include "ps5-hdmi-video-protocol.h"
 #include "ps5-fan.h"            /* r5.14 */
+#include "ps5-fan-quiet.h"       /* r5.26.2: quiet servo table from power-on */
 #include "button-keys.h"
 #include <Protocol/SimpleTextIn.h>
 #include <Protocol/SimpleTextInEx.h>
@@ -191,6 +192,47 @@ STATIC EFI_STATUS EFIAPI VideoFan(UINT32 TargetC,UINT32 *BeforeC,UINT32 *AfterC,
     R?0:Old[0],R?0:Old[1],R?0:Old[2],R?0:Old[3],R?0:Old[4],R?0:Old[5],Before,After,TargetC,D0,D1,R));
   return R?EFI_DEVICE_ERROR:EFI_SUCCESS;
 }
+/* r5.26.2: quiet backup servo table from power-on (ps5-hdmi-video-protocol.h PS5_HDMI_VIDEO_FAN_QUIET) */
+STATIC UINT8 mFcReply[4+PS5_FQ_SIZE+64],mFcReq[4+PS5_FQ_SIZE],mFcBackup[PS5_FQ_SIZE];
+STATIC EFI_STATUS EFIAPI VideoFanQuiet(UINT8 *Original,UINTN OriginalSize,UINT32 *Flags,UINT32 *DutyBefore,UINT32 *DutyAfter,INT32 *TempMilli) {
+  if(!Original || OriginalSize<PS5_FQ_SIZE || !Flags)return EFI_INVALID_PARAMETER;
+  if(mVideoBusy)return EFI_ALREADY_STARTED;
+  if(!UncachedMmio(MAILBOX) || !UncachedMmio(DOORBELL))return EFI_NOT_READY;
+  mVideoBusy=TRUE;*Flags=0;
+  struct ps5_icc_io Io={NULL,ReadIcc,WriteIcc,Ticks,Relax,TSC_HZ*12};
+  UINT8 Reply[128],Zone[4]={0,0,0,0},Mode[4]={0,PS5_FQ_MODE_AUTO,0,0};unsigned Bytes=0,Duty=0;UINT32 D0=0xFFFF,D1=0xFFFF;INT32 T=-1;int R;
+  EFI_TPL OldTpl=gBS->RaiseTPL(TPL_HIGH_LEVEL);
+  BOOLEAN Interrupts=SaveAndDisableInterrupts();
+  if(!ps5_icc_query_events(&Io,PS5_FAN_SERVICE,1,NULL,0,Reply,sizeof(Reply),&Bytes,ps5_edid_notification,&mEdid) &&
+     !ps5_fan_duty(Reply,Bytes,&Duty))D0=Duty;
+  if(!ps5_icc_query_events(&Io,PS5_FQ_TEMP_SERVICE,1,Zone,sizeof(Zone),Reply,sizeof(Reply),&Bytes,ps5_edid_notification,&mEdid) && Bytes>=4) {
+    int Raw=(INT16)(Reply[2]|Reply[3]<<8); if(Raw>=0 && Raw<125*256)T=(Raw*1000+128)/256; }
+  R=ps5_icc_query_events(&Io,PS5_FAN_SERVICE,0x0f,NULL,0,mFcReply,sizeof(mFcReply),&Bytes,ps5_edid_notification,&mEdid);   /* snapshot */
+  if(!R && (Bytes<4+PS5_FQ_SIZE || (mFcReply[0]|mFcReply[1])))R=-6;
+  if(!R && ps5_fq_is_quiet(mFcReply+4))*Flags|=2;            /* an earlier run left the quiet table: keep it, no original */
+  else if(!R) {
+    CopyMem(Original,mFcReply+4,PS5_FQ_SIZE);*Flags|=1;
+    ps5_fq_prepare(mFcBackup,Original);
+    ZeroMem(mFcReq,4);CopyMem(mFcReq+4,mFcBackup,PS5_FQ_SIZE);
+    R=ps5_icc_query_events(&Io,PS5_FAN_SERVICE,0x0e,mFcReq,sizeof(mFcReq),Reply,sizeof(Reply),&Bytes,ps5_edid_notification,&mEdid);
+    if(!R && Bytes>=2 && (Reply[0]|Reply[1]))R=-7;
+    if(R) {   /* put the original back */
+      CopyMem(mFcReq+4,Original,PS5_FQ_SIZE);
+      (void)ps5_icc_query_events(&Io,PS5_FAN_SERVICE,0x0e,mFcReq,sizeof(mFcReq),Reply,sizeof(Reply),&Bytes,ps5_edid_notification,&mEdid);
+    } else *Flags|=4;
+  }
+  if(!R) { R=ps5_icc_query_events(&Io,PS5_FAN_SERVICE,2,Mode,sizeof(Mode),Reply,sizeof(Reply),&Bytes,ps5_edid_notification,&mEdid);
+           if(!R && Bytes>=2 && (Reply[0]|Reply[1]))R=-8;
+           if(!R)*Flags|=8; }
+  if(!ps5_icc_query_events(&Io,PS5_FAN_SERVICE,1,NULL,0,Reply,sizeof(Reply),&Bytes,ps5_edid_notification,&mEdid) &&
+     !ps5_fan_duty(Reply,Bytes,&Duty))D1=Duty;
+  SetInterruptState(Interrupts);gBS->RestoreTPL(OldTpl);mVideoBusy=FALSE;
+  if(DutyBefore)*DutyBefore=D0;
+  if(DutyAfter)*DutyAfter=D1;
+  if(TempMilli)*TempMilli=T;
+  DEBUG((DEBUG_ERROR,"PS5 fan: quiet backup table: flags %x, MainSoC %d mC, duty %u -> %u /1024, result %d\n",*Flags,T,D0,D1,R));
+  return R?EFI_DEVICE_ERROR:EFI_SUCCESS;
+}
 /* r5.20: read-only ICC part of the BIOS "System check" (ps5-hdmi-video-protocol.h PS5_HDMI_DIAG_ICC) */
 STATIC EFI_STATUS EFIAPI VideoDiagIcc(PS5_HDMI_DIAG_ICC *Out) {
   if(Out==NULL)return EFI_INVALID_PARAMETER;
@@ -215,7 +257,7 @@ STATIC EFI_STATUS EFIAPI VideoDiagIcc(PS5_HDMI_DIAG_ICC *Out) {
   SetInterruptState(Interrupts);gBS->RestoreTPL(OldTpl);mVideoBusy=FALSE;
   return EFI_SUCCESS;
 }
-STATIC PS5_HDMI_VIDEO_PROTOCOL mVideo={VideoStage,VideoReadRegisters,VideoGetEdid,VideoSetMode,VideoFan,VideoDiagIcc};
+STATIC PS5_HDMI_VIDEO_PROTOCOL mVideo={VideoStage,VideoReadRegisters,VideoGetEdid,VideoSetMode,VideoFan,VideoDiagIcc,VideoFanQuiet};
 #endif
 #ifdef PS5_HDMI_PREPARE
 /* v2.51: one-button console input from the PS5 power button (ICC service 8).
@@ -607,6 +649,12 @@ STATIC VOID EdidPublish(VOID) {
   if(gRT!=NULL && gRT->SetVariable!=NULL) {
     S1=gRT->SetVariable(L"Ps5HdmiEdid",&mPs5EdidVendorGuid,Attr,N,mEdidPublished);
     S2=gRT->SetVariable(L"Ps5HdmiEdidInfo",&mPs5EdidVendorGuid,Attr,sizeof(Info),&Info);
+    { /* r5.26.5 (PSWloader v1.1, HDMI audio): the bridge type for the GPU driver's DP audio N - PS5 Linux getHdmiDpAudioN():
+       * 0x80000 behind FLAVA3 (converter 2), the default behind VERDE (3). One byte, volatile, same vendor GUID. */
+      UINT8 Bridge=mVideoConfig.converter;
+      EFI_STATUS Sb=gRT->SetVariable(L"Ps5HdmiBridge",&mPs5EdidVendorGuid,Attr,1,&Bridge);
+      DEBUG((DEBUG_ERROR,"PS5 HDMI bridge published: converter %u: %r\n",(UINT32)Bridge,Sb));
+    }
     UINT32 A=0;
     S3=gRT->GetVariable(L"Ps5HdmiEdid",&mPs5EdidVendorGuid,&A,&Size,mEdidReadback);
     if(!EFI_ERROR(S3)){Crc=ps5_edid_crc32(mEdidReadback,(unsigned)Size);if(Crc!=Info.crc32 || A!=Attr)S3=EFI_CRC_ERROR;}

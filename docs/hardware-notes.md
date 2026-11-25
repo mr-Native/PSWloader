@@ -5,6 +5,7 @@ Practical notes on PS5 hardware behavior under native Windows 11.
 ## PS5 revisions
 
 - **PS5 Phat & PS5 Slim (CFI-1xxx / CFI-2xxx on 13.60):** Supported. HDMI output, GPU acceleration, Ethernet, Wi-Fi 6, USB, power/fan control, and internal/external storage all work.
+- **System software versions:** tested on 13.60. Like PS5 Linux, the firmware takes the PCI layout from the console, so the same versions (3.00 to 13.60) should work, but they are unconfirmed. Reports from other versions (with logs) are welcome in the issues.
 - **Wi-Fi chipsets:** PS5 consoles ship with the NXP/Marvell IW620 Wi-Fi 6 module (`PCI\VEN_1B4B&DEV_2B56`), which is supported by `ps5wifi.sys` on both 2.4 GHz and 5 GHz. Newer hardware revisions with a different PCI vendor/device ID (for example MediaTek `14C3:...`) are not covered by `ps5wifi.sys` yet — if your adapter shows up as an unknown network controller in Device Manager, open an issue with its Hardware ID.
 
 ## Wi-Fi firmware handoff
@@ -18,6 +19,7 @@ PSWloader does not bundle any proprietary Sony or NXP firmware binaries. Instead
 
 ## Display & HDMI
 
+- HDMI audio works (stereo): Windows shows a *Digital Output* audio device. Tested on a PS5 with the FLAVA3 HDMI bridge; the Slim's VERDE bridge is untested.
 - Display resolution is configured by the UEFI firmware at boot (via the `ESC` setup menu under *Display*). Changing resolution from inside Windows is not supported yet.
 - If a monitor shows no signal on the first boot, press `ESC` during startup or check `\PS5DIAG.LOG` on the EFI partition for the detected EDID modes.
 

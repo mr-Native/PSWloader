@@ -16,23 +16,34 @@ ACPI tables and a set of Windows drivers.
 
 - Latest stock Windows 11 from the official Microsoft ISO
 - GPU driver (*AMD Oberon*): DirectX 11, DirectX 12, Vulkan and OpenGL 4.6
-- HDMI output
+- HDMI output with HDMI audio
 - All 8 CPU cores / 16 threads with clock control by Windows
 - Install to an internal M.2 SSD or a USB drive
-- Wired Ethernet, on-board Wi-Fi 6 (2.4 GHz / 5 GHz), USB keyboard and mouse
-- Power button shutdown, fan control by CPU temperature, three power presets
+- Wired Ethernet, on-board Wi-Fi 6 (2.4 GHz / 5 GHz, WPA2), USB keyboard and mouse
+- Power button shutdown, smart automatic fan control, three power presets
 - Firmware setup (English and German) with boot order, display and power settings and a system check
-- Restart from Windows goes straight back to Windows, without GameOS
+- Restart from Windows boots straight back into Windows, without GameOS
 
-Not supported (yet): Bluetooth, audio, changing the resolution from Windows.
+Not supported (yet): Bluetooth, changing the resolution from Windows, PS5 Pro.
 
-Tested on system software 13.60.
+**Own a jailbroken PS5 Pro and want to help bring PSWloader to it?** Send me a DM on X/Twitter: @mrNative_
+
+Tested on a PS5 Phat (Fat) with system software 13.60.
+
+**Other system software versions:** PSWloader is built to run on the same versions as PS5 Linux (3.00 to 13.60 on
+Phat and Slim): the firmware takes the PCI layout from the console instead of fixed values measured on 13.60. Only
+13.60 is tested so far. If you use another version and run into problems, please report them in an issue, with the logs listed
+in [Troubleshooting](docs/troubleshooting.md#reporting-a-problem).
 
 ## Requirements
 
-- A PS5 that can run payloads through a Payload Manager
+- A PS5 (Phat / Slim) that can run payloads through a Payload Manager
 - USB drive (16 GB or more) for the official Windows 11 ISO
-- Internal M.2 SSD or USB drive as the target drive
+- A **second** drive as the target: internal M.2 SSD or another USB drive.\
+  Only one external drive? Write the ISO to
+  it with Rufus in **Windows To Go** mode instead, extract `pswloader-v*-Install-Files.zip` onto it as in step 2, boot it
+  with PSWloader and run `sources\$OEM$\$1\PSWSetup\PSWSetup.exe` once on the desktop (it restarts once and installs
+  the PS5 drivers).
 - HDMI display and USB keyboard
 
 ## Installation
@@ -40,14 +51,14 @@ Tested on system software 13.60.
 Download the files from the [latest release](../../releases/latest).
 
 1. Write the Windows 11 ISO to the USB drive (using Rufus or another flashing tool).
-2. Extract `pswloader-v*-USB-Stick.zip` to the root of the USB drive.
-3. Copy `PSWloader.elf` and `PSWloader.elf.json` into a folder of the Payload Manager on the console.
+2. Extract `pswloader-v*-Install-Files.zip` to the root of the USB drive.
+3. Copy `PSWloader.elf` into a folder of the Payload Manager on the console.
 4. Plug in the Windows USB installer drive and your target drive, then start **PSWloader.elf**. When the orange light stays on, wake the console.
-5. On the PSWloader screen press `DEL` and pick the Windows USB installer drive. *(FAT32 works on the first boot; if your flashing tool formatted the drive as NTFS, Setup enables test-signing in the drive's BCD on the first start — restart once into PSWloader if disks are not listed yet.)*
-6. Install Windows as usual. If Setup asks about an upgrade, choose **No**. On the internal M.2 SSD, ignore the two tiny reserved partitions (~33 MB and ~17 MB) — they belong to PlayStation (GameOS) and must stay untouched; only delete any other existing partitions and install into the unallocated space.
-7. Setup restarts come back through PSWloader by themselves and Setup continues automatically (v1.0.5; you can unplug the USB installer drive after the first restart). If a restart ever ends in GameOS, start **PSWloader.elf** again.
-8. Before the first sign-in, all PS5 drivers and tools are installed automatically. On the first Desktop sign-in, confirm the restart prompt to activate all drivers.
-9. Press `ESC` on the PSWloader screen to open the UEFI menu: under *Boot → Boot order*, move the installed Windows drive to the top if needed, and optionally configure power presets and enable **Fast Boot** for faster startups.
+5. On the PSWloader screen press `DEL` and pick the Windows USB installer drive. *(On an NTFS drive the black PSWloader window in Windows Setup asks you to close Setup once; after that restart the disks are listed.)*
+6. Install Windows as usual. If Setup asks about an upgrade, choose **No**. No Microsoft account is needed: Setup asks for a local user name. On the internal M.2 SSD, ignore the two tiny reserved partitions (~33 MB and ~17 MB) — they belong to PlayStation (GameOS) and must stay untouched; only delete any other existing partitions and install into the unallocated space.
+7. Setup restarts come back through PSWloader by themselves and Setup continues automatically (you can unplug the USB installer drive after the first restart). If a restart ever ends in GameOS, start **PSWloader.elf** again.
+8. Before the first sign-in Windows shows **"Just a moment..."** while all PS5 drivers and tools install automatically. This usually takes 5–10 minutes; do not switch the console off. On the first sign-in, confirm the restart prompt to activate all drivers.
+9. Press `ESC` on the PSWloader screen to open the UEFI menu: under *Boot → Boot order*, move the installed Windows drive to the top if needed. Optionally choose a power preset and turn on **Fast boot** (shorter start screen) and **Fast restart** (a restart from Windows skips the start screen).
 
 Windows runs in test-signing mode because the drivers are not signed by Microsoft. There is no Secure Boot and no TPM 2.0
 either. Games whose anti-cheat refuses test mode, or requires Secure Boot or TPM 2.0, will not start.
@@ -55,16 +66,24 @@ either. Games whose anti-cheat refuses test mode, or requires Secure Boot or TPM
 PSWloader does not write to the console's flash or to GameOS data. On the internal SSD Windows only sees the area
 behind GameOS, and writes into the GameOS area are blocked. Back up anything important before installing anyway.
 
-If something goes wrong, open an issue and attach `\PS5DIAG.LOG` (UEFI Bootmanager → Diagnostics → *Run system check*)
-and the newest `C:\PSWSetup\logs\setup_psw*.log`.
+## Troubleshooting
+
+Fixes for common problems, known issues and the logs to attach to an issue are in **[docs/troubleshooting.md](docs/troubleshooting.md)**.
 
 ## Updating an existing installation
 
-1. Download and extract `pswloader-v*-Updater.zip`, then run `PSWUpdater-v*.exe` as Administrator.
-2. If prompted that `PSWloader.elf` also needs updating, replace `PSWloader.elf` and `PSWloader.elf.json` in your Payload Manager after the reboot.
+PSWloader checks for a new release when you sign in and offers to download and install it, so most updates need no
+manual steps (see [docs/updating.md](docs/updating.md)). To update by hand:
+
+1. Download and extract `pswloader-v*-Updater.zip`, then run `PSWUpdater-v*.exe` as Administrator. 
+2. If prompted that `PSWloader.elf` also needs updating, replace `PSWloader.elf` in your Payload Manager.
 3. Confirm the restart prompt when the update completes. Update logs are saved under `C:\PSWSetup\Update\`.
 
-See the [Documentation](docs/README.md) for details on automatic update checks (`updater.json`), hardware compatibility notes, and troubleshooting.
+Later firmware updates come with the updater and need no new `PSWloader.elf`; replace the ELF only when a release says
+so. From v1.1 on, an updater refuses to install an older version over a
+newer one.
+
+See the [Documentation](docs/README.md) for details on automatic update checks (`updater.json`) and hardware compatibility notes.
 
 ## Support
 

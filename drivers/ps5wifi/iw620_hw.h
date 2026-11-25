@@ -124,6 +124,7 @@
 #define TLV_TYPE_CHANLIST       0x0101u
 #define TLV_TYPE_AUTH_TYPE      0x011Fu
 #define TLV_TYPE_KEY_MATERIAL   0x010Eu
+#define TLV_TYPE_KEY_PARAM_V2   0x019Cu  /* PROPRIETARY_TLV_BASE_ID + 156 */
 
 /* Key types & info for CMD_802_11_KEY_MATERIAL (v2) */
 #define KEY_TYPE_ID_WEP         0x00u
@@ -276,12 +277,15 @@ typedef struct _IW620_RXPD {
     UCHAR   reserved4;
 } IW620_RXPD;
 
+/* mwifiex_ie_type_key_param_set_v2 (after the TLV header) with the AES
+ * parameter block: 10 fixed bytes + PN, key length and key. */
+#define KEY_PARAMS_FIXED_LEN    10u
 typedef struct _KEY_PARAM_V2 {
     UCHAR  mac_addr[6];
     UCHAR  key_idx;
-    UCHAR  is_default;
-    USHORT key_info;
     UCHAR  key_type;
+    USHORT key_info;
+    UCHAR  pn[8];
     USHORT key_len;
     UCHAR  key[32];
 } KEY_PARAM_V2;
