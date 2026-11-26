@@ -1,0 +1,51 @@
+## @file
+#  Ps5InfoDxe v0.1 (15.11.2026): read-only HII form "PS5 System" (firmware, CPU, RAM, display, monitor).
+#  No MMIO, no ICC, no variable writes: CPUID, memory map, GOP and the volatile Ps5HdmiEdid/Ps5HdmiEdidInfo/Ps5HdmiMode.
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = Ps5InfoDxe
+  FILE_GUID      = 6b1d3f0a-5c2e-4f7d-9a41-1360a1b0c0de
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 0.3
+  ENTRY_POINT    = Ps5InfoEntry
+
+[Sources]
+  Ps5InfoDxe.c
+  Ps5InfoVfr.vfr
+  Ps5BootVfr.vfr
+  Ps5PerfVfr.vfr
+  Ps5DispVfr.vfr
+  Ps5DiagVfr.vfr
+  Ps5ExitVfr.vfr
+  Ps5InfoStrings.uni
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  UefiLib
+  HiiLib
+  DevicePathLib
+  MemoryAllocationLib
+  BaseMemoryLib
+  BaseLib
+  PrintLib
+  DebugLib
+
+[Protocols]
+  gEfiHiiConfigAccessProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiGraphicsOutputProtocolGuid
+
+[Guids]
+  gEfiGlobalVariableGuid
+  gEfiIfrTianoGuid
+
+[Depex]
+  gEfiHiiDatabaseProtocolGuid

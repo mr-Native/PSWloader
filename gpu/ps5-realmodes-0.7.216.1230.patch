@@ -1,0 +1,411 @@
+# PSWloader GPU driver 0.7.216.1230 (LAB): real resolutions in Windows Settings. The running mode plus every mode with a replay that the
+# monitor's EDID offers is offered as source (one per size)/target/monitor mode; a commit of another one switches the hardware
+# synchronously (Ps5HpModeChange, no replug). Needs EnableHotplugModeSet bits 1+4. HW 25.11.2026: Settings 1080p60 -> 2560x1440@60,
+# hotplug Dell 3440x1440@100 <-> UGREEN (Windows restores its per-monitor mode) all with picture. Against 0.7.216.1229. Test-signed c3359be3.
+--- a/driver/kmd/bc250kmd.h
++++ b/driver/kmd/bc250kmd.h
+@@ -800,6 +800,13 @@
+ NTSTATUS Ps5HpModeChange(BC250_DEVICE* Device, ULONG ModeId, ULONG ClockKhz, USHORT H, USHORT V);
+ void Ps5HpAfterFlip(BC250_DEVICE* Device);            // v10.18: first flip after a mode change ends the black test pattern
+ BOOLEAN Ps5HpBlackPending(void);
++// 0.7.216.1230 (real modes): the timings Windows may pick in Settings - the running mode first, then every mode with a replay
++// that the monitor's EDID offers. Count 1 (only the running mode) when the feature is off or nothing else fits.
++#define PS5_REAL_MODE_MAX 8
++typedef struct { ULONG Id, Width, Height, Pitch; D3DKMDT_VIDEO_SIGNAL_INFO Signal; } PS5_REAL_MODE;
++ULONG Ps5RealModes(_In_ const BC250_DEVICE* Device, _Out_writes_(PS5_REAL_MODE_MAX) PS5_REAL_MODE* Out);
++BOOLEAN Ps5HpRealModesOn(void);                       // wddm.c: waiter thread runs with EnableHotplugModeSet bit 4
++NTSTATUS Ps5HpRequestMode(ULONG ModeId);              // wddm.c: queue a mode change for the waiter thread (any IRQL <= DISPATCH)
+ #endif
+ void GuardRecordStartStarted(void);
+ void GuardRecordStopBegin(BC250_DEVICE* Device);
+--- a/driver/kmd/ps5_hpmode.c
++++ b/driver/kmd/ps5_hpmode.c
+@@ -287,9 +287,53 @@
+     WRITE_REGISTER_ULONG((PULONG)&Device->Mmio[0x13450u / 4u], READ_REGISTER_ULONG((PULONG)&Device->Mmio[0x13450u / 4u]) & ~1ul);
+ }
+ BOOLEAN Ps5HpBlackPending(void) { return InterlockedCompareExchange(&g_Ps5HpBlack, 0, 0) != 0; }
++
++// 0.7.216.1230: the running mode, then the replay modes the EDID offers that Ps5HpModeChange would accept (same pitch rule,
++// surface below the firmware tail). The EDID is the one served to Windows (boot variable or the last hotplug).
++ULONG Ps5RealModes(_In_ const BC250_DEVICE* Device, _Out_writes_(PS5_REAL_MODE_MAX) PS5_REAL_MODE* Out)
++{
++    static struct ps5_edid_info info;               /* 1.4 KB: not on the stack; callers are serialised by dxgkrnl */
++    static volatile LONG lastKey = -1;
++    ULONG n = 0, cur = HpCurrentMode(Device), id;
++    LONG key;
++    BOOLEAN changed;
++    if (!Device->InheritedSignalValid) return 0;
++    Out[0].Id = cur; Out[0].Width = Device->Post.Width; Out[0].Height = Device->Post.Height; Out[0].Pitch = Device->Post.Pitch;
++    Out[0].Signal = Device->InheritedSignal; n = 1;
++    key = (LONG)((Ps5HpRealModesOn() ? 1 : 0) | (cur < PS5_MODE_COUNT ? 2 : 0) | (Device->Modeset.DescriptorServed ? 4 : 0) |
++                 (Device->Modeset.EdidLength >= 128 ? 8 : 0) | (cur & 0xff) << 8);
++    changed = InterlockedExchange(&lastKey, key) != key;
++    if (changed) GuardPs5Note(L"RealModeKey", (ULONG)key);
++    if (changed)
++        GuardLog("ps5 realmode: on %u current %lu descriptor %u edid %lu bytes", Ps5HpRealModesOn(), cur,
++                 (UINT)Device->Modeset.DescriptorServed, Device->Modeset.EdidLength);
++    if (!Ps5HpRealModesOn() || cur >= PS5_MODE_COUNT || !Device->Modeset.DescriptorServed || Device->Modeset.EdidLength < 128) return n;
++    if (ps5_edid_parse(Device->Modeset.Edid, Device->Modeset.EdidLength, &info) != 0) { if (changed) GuardLog("ps5 realmode: EDID not parsed"); return n; }
++    for (id = 0; id < PS5_MODE_COUNT && n < PS5_REAL_MODE_MAX; id++) {
++        const struct ps5_dcn201_mode_replay* R = Ps5HpReplay(id);
++        const struct ps5_timing* t = &ps5_display_modes[id].t;
++        ULONG pitch;
++        if (id == cur || R == NULL || ps5_display_offered(&info, (enum ps5_mode_id)id) != 1) continue;
++        pitch = R->pitch_pixels * 4u;
++        if (R->width != t->h || R->height != t->v || pitch != DcnPrimaryPitch(R->width) ||
++            PS5_DCN201_REPLAY_SURFACE + (ULONGLONG)pitch * R->height > 0x46E000000ull) continue;
++        if (changed) GuardLog("ps5 realmode: mode %lu %ux%u offered", id, t->h, t->v);
++        Out[n].Id = id; Out[n].Width = t->h; Out[n].Height = t->v; Out[n].Pitch = pitch;
++        HpSignal(t, &Out[n].Signal);
++        n++;
++    }
++    {
++        static volatile LONG calls;
++        LONG c = InterlockedIncrement(&calls);
++        if (c <= 40 || (c % 200) == 0) GuardLog("ps5 realmode: call %ld -> %lu mode(s)%s%s%s", c, n, n > 1 ? " +" : "",
++                                               n > 1 ? ps5_display_modes[Out[1].Id].name : "", n > 2 ? " ..." : "");
++    }
++    return n;
++}
+ #else
+ NTSTATUS Ps5HpModeChange(BC250_DEVICE* Device, ULONG ModeId, ULONG ClockKhz, USHORT H, USHORT V)
+ { UNREFERENCED_PARAMETER(Device); UNREFERENCED_PARAMETER(ModeId); UNREFERENCED_PARAMETER(ClockKhz); UNREFERENCED_PARAMETER(H); UNREFERENCED_PARAMETER(V); return STATUS_NOT_SUPPORTED; }
+ void Ps5HpAfterFlip(BC250_DEVICE* Device) { UNREFERENCED_PARAMETER(Device); }
+ BOOLEAN Ps5HpBlackPending(void) { return FALSE; }
++ULONG Ps5RealModes(const BC250_DEVICE* Device, PS5_REAL_MODE* Out) { UNREFERENCED_PARAMETER(Device); UNREFERENCED_PARAMETER(Out); return 0; }
+ #endif
+--- a/driver/kmd/wddm.c
++++ b/driver/kmd/wddm.c
+@@ -5974,6 +5974,7 @@
+  *   4 (K3-K6, v10.18) mode change to the picked mode (ps5_hpmode.c) between the two halves of the replug:
+  *          disconnected, 500 ms, mode change (fallback to the old mode on any failure), connected. Needs bit 2.
+  * Bits 2 and 4 need bit 1. Thread start/stop at the sampler's points (pnp.c), joined on stop. PASSIVE only. */
++#include "ps5hp/ps5-display-mode.h"   /* 0.7.216.1230: ps5_display_modes for the real-mode requests */
+ #define PS5PWR_IOCTL_HP_PICK 0x80026434u
+ #define PS5_HP_BIT_WAITER    1u
+ #define PS5_HP_BIT_EDID      2u
+@@ -5992,7 +5993,31 @@
+     KEVENT Stop;
+     LONG Running;
+     ULONG Mode;
++    KEVENT ModeRequest;                             /* 0.7.216.1230: a Settings commit asks for another real mode */
++    volatile LONG RequestId;                        /* mode id + 1, 0 = none */
+ } g_Ps5Hp;
++static ULONG Ps5HpSetting(void);
++BOOLEAN Ps5HpRealModesOn(void)
++{
++    /* the setting, not the thread: dxgkrnl enumerates the modes at start, before the waiter thread runs (the request
++     * itself waits for the thread). Read once at PASSIVE, then cached. */
++    static volatile LONG cached = -1;
++    LONG v = InterlockedCompareExchange(&cached, 0, 0);
++    if (v < 0) {
++        if (KeGetCurrentIrql() != PASSIVE_LEVEL) return FALSE;
++        v = (Ps5HpSetting() & (PS5_HP_BIT_WAITER | PS5_HP_BIT_MODESET)) == (PS5_HP_BIT_WAITER | PS5_HP_BIT_MODESET) ? 1 : 0;
++        InterlockedExchange(&cached, v);
++    }
++    return v != 0;
++}
++NTSTATUS Ps5HpRequestMode(ULONG ModeId)
++{
++    if (!Ps5HpRealModesOn() || ModeId >= PS5_MODE_COUNT || InterlockedCompareExchange(&g_Ps5Hp.Running, 0, 0) == 0)
++        return STATUS_NOT_SUPPORTED;
++    InterlockedExchange(&g_Ps5Hp.RequestId, (LONG)ModeId + 1);
++    KeSetEvent(&g_Ps5Hp.ModeRequest, IO_NO_INCREMENT, FALSE);
++    return STATUS_SUCCESS;
++}
+ static ULONG Ps5HpSetting(void)                     /* Parameters\EnableHotplugModeSet, 0 when absent or not a REG_DWORD */
+ {
+     static const WCHAR path[] = L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\bc250kmd\\Parameters";
+@@ -6065,6 +6090,33 @@
+         }
+     }
+ }
++/* 0.7.216.1230: a commit from Settings picked another real mode - the same sequence as a pick (mode change, then the replug,
++ * so dxgkrnl re-reads the running tuple), outside the DDI. */
++static void Ps5HpOnRequest(BC250_DEVICE* Device)
++{
++    LONG id = InterlockedExchange(&g_Ps5Hp.RequestId, 0) - 1;
++    const struct ps5_timing* t;
++    LARGE_INTEGER pause;
++    NTSTATUS status, off, on;
++    if (id < 0 || id >= PS5_MODE_COUNT) return;
++    t = &ps5_display_modes[id].t;
++    GuardLog("ps5 realmode: request %ld %ux%u %lu kHz", id, t->h, t->v, t->clock_khz);
++    status = Ps5HpModeChange(Device, (ULONG)id, t->clock_khz, t->h, t->v);
++    GuardPs5Note(L"RealModeStatus", (ULONG)status);
++    if (NT_SUCCESS(status)) {
++        /* Windows committed this mode itself (Settings): no replug - after one dxgkrnl restores the mode saved for the monitor
++         * and undoes the change. Its primary is already at the new size; the black pattern goes at once, not at the next flip. */
++        Ps5HpAfterFlip(Device);
++        GuardLog("ps5 realmode: mode change 0x%08X, picture on", (ULONG)status);
++        return;
++    }
++    /* failed: the old mode runs again (K6) - the replug makes Windows take the running tuple back */
++    off = ConnectorPs5Indicate(Device, FALSE);
++    pause.QuadPart = -5000000ll;
++    if (KeWaitForSingleObject(&g_Ps5Hp.Stop, Executive, KernelMode, FALSE, &pause) != STATUS_TIMEOUT) return;
++    on = ConnectorPs5Indicate(Device, TRUE);
++    GuardLog("ps5 realmode: mode change 0x%08X, replug %08lX/%08lX", (ULONG)status, (ULONG)off, (ULONG)on);
++}
+ static KSTART_ROUTINE Ps5HpMain;
+ static VOID Ps5HpMain(_In_ PVOID Context)
+ {
+@@ -6076,16 +6128,21 @@
+             LARGE_INTEGER retry;
+             ev = Ps5HpOpenEvent();
+             if (ev == NULL) {
++                PVOID objects[2] = { &g_Ps5Hp.Stop, &g_Ps5Hp.ModeRequest };
++                NTSTATUS w;
+                 if ((misses++ % 60u) == 0u) GuardLog("ps5 hotplug: PswHotplug not there yet (ps5pwr 1.13+), retry every 5 s");
+                 retry.QuadPart = -50000000ll;
+-                if (KeWaitForSingleObject(&g_Ps5Hp.Stop, Executive, KernelMode, FALSE, &retry) != STATUS_TIMEOUT) break;
++                w = KeWaitForMultipleObjects(2, objects, WaitAny, Executive, KernelMode, FALSE, &retry, NULL);
++                if (w == STATUS_WAIT_1) Ps5HpOnRequest(device);
++                else if (w != STATUS_TIMEOUT) break;
+                 continue;
+             }
+             GuardLog("ps5 hotplug: waiting on PswHotplug (EnableHotplugModeSet %lu)", g_Ps5Hp.Mode);
+         }
+         {
+-            PVOID objects[2] = { &g_Ps5Hp.Stop, ev };
+-            NTSTATUS w = KeWaitForMultipleObjects(2, objects, WaitAny, Executive, KernelMode, FALSE, NULL, NULL);
++            PVOID objects[3] = { &g_Ps5Hp.Stop, ev, &g_Ps5Hp.ModeRequest };
++            NTSTATUS w = KeWaitForMultipleObjects(3, objects, WaitAny, Executive, KernelMode, FALSE, NULL, NULL);
++            if (w == STATUS_WAIT_2) { Ps5HpOnRequest(device); continue; }
+             if (w != STATUS_WAIT_1) break;          /* stop (or a failed wait): leave */
+         }
+         Ps5HpOnPick(device, &lastSeq);
+@@ -6108,6 +6165,8 @@
+     if (InterlockedCompareExchange(&g_Ps5Hp.Running, 1, 0) != 0) return;
+     g_Ps5Hp.Mode = mode;
+     KeInitializeEvent(&g_Ps5Hp.Stop, NotificationEvent, FALSE);
++    KeInitializeEvent(&g_Ps5Hp.ModeRequest, SynchronizationEvent, FALSE);
++    InterlockedExchange(&g_Ps5Hp.RequestId, 0);
+     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+     status = PsCreateSystemThread(&h, THREAD_ALL_ACCESS, &oa, NULL, NULL, Ps5HpMain, Device);
+     if (!NT_SUCCESS(status)) {
+--- a/driver/kmd/display.c
++++ b/driver/kmd/display.c
+@@ -1222,6 +1222,41 @@
+     if (count == 0 || count > BC250_SOURCE_MODE_MAX) return STATUS_GRAPHICS_INVALID_PIXELFORMAT;
+     status = VidPn->pfnCreateNewSourceModeSet(hVidPn, SourceId, &hSet, &set);
+     if (!NT_SUCCESS(status)) return status;
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++    // 0.7.216.1230 real modes: on the inherited route every real mode is its own size (identity, its own timing)
++    if (Device->Modeset.InheritedFixed && !ConnectorIsEnabled((BC250_DEVICE*)Device)) {
++        PS5_REAL_MODE real[PS5_REAL_MODE_MAX];
++        const ULONG n = Ps5RealModes(Device, real);
++        if (n > 1) {
++            for (size = 0; size < n && NT_SUCCESS(status); ++size) {
++                ULONG dup = 0, k;
++                for (k = 0; k < size; ++k)               // one source mode per size: refresh rates differ only in the target
++                    if (real[k].Width == real[size].Width && real[k].Height == real[size].Height) dup = 1;
++                if (dup) continue;
++                for (i = 0; i < count && NT_SUCCESS(status); ++i) {
++                    const ULONG stride = Bc250SourceModeStride(formats[i], real[size].Pitch);
++                    if (stride == 0) { status = STATUS_GRAPHICS_INVALID_STRIDE; break; }
++                    status = set->pfnCreateNewModeInfo(hSet, &mode);
++                    if (!NT_SUCCESS(status)) break;
++                    mode->Type = D3DKMDT_RMT_GRAPHICS;
++                    mode->Format.Graphics.PrimSurfSize.cx = real[size].Width;
++                    mode->Format.Graphics.PrimSurfSize.cy = real[size].Height;
++                    mode->Format.Graphics.VisibleRegionSize = mode->Format.Graphics.PrimSurfSize;
++                    mode->Format.Graphics.Stride = stride;
++                    mode->Format.Graphics.PixelFormat = (D3DDDIFORMAT)formats[i];
++                    mode->Format.Graphics.ColorBasis = D3DKMDT_CB_SCRGB;
++                    mode->Format.Graphics.PixelValueAccessMode = D3DKMDT_PVAM_DIRECT;
++                    status = set->pfnAddMode(hSet, mode);
++                    if (!NT_SUCCESS(status)) {
++                        set->pfnReleaseModeInfo(hSet, mode);
++                        if (status == STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET) status = STATUS_SUCCESS;
++                    } else offered++;
++                }
++            }
++            goto assign;
++        }
++    }
++#endif
+ 
+     for (size = 0; size < sizes && NT_SUCCESS(status); ++size)
+     {
+@@ -1251,6 +1286,9 @@
+             else offered++;
+         }
+     }
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++assign:
++#endif
+     // The native size is always cofunctional with identity; an empty set would leave dxgkrnl no mode at all.
+     if (NT_SUCCESS(status) && offered == 0) status = STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE_MODE;
+     if (NT_SUCCESS(status)) status = VidPn->pfnAssignSourceModeSet(hVidPn, SourceId, hSet);
+@@ -1268,6 +1306,31 @@
+ 
+     status = VidPn->pfnCreateNewTargetModeSet(hVidPn, TargetId, &hSet, &set);
+     if (!NT_SUCCESS(status)) return status;
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++    if (Device->Modeset.InheritedFixed && !ConnectorIsEnabled((BC250_DEVICE*)Device)) {   // 0.7.216.1230 real modes
++        PS5_REAL_MODE real[PS5_REAL_MODE_MAX];
++        const ULONG n = Ps5RealModes(Device, real);
++        ULONG k;
++        if (n > 1) {
++            for (k = 0; k < n && NT_SUCCESS(status); ++k) {
++                status = set->pfnCreateNewModeInfo(hSet, &mode);
++                if (!NT_SUCCESS(status)) break;
++                mode->VideoSignalInfo = real[k].Signal;
++                mode->WireFormatAndPreference.Value = 0;
++                mode->WireFormatAndPreference.Preference = k == 0 ? D3DKMDT_MP_PREFERRED : D3DKMDT_MP_NOTPREFERRED;
++                mode->WireFormatAndPreference.Rgb = D3DKMDT_BITS_PER_COMPONENT_08;
++                status = set->pfnAddMode(hSet, mode);
++                if (!NT_SUCCESS(status)) {
++                    set->pfnReleaseModeInfo(hSet, mode);
++                    if (status == STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET) status = STATUS_SUCCESS;
++                }
++            }
++            if (NT_SUCCESS(status)) status = VidPn->pfnAssignTargetModeSet(hVidPn, TargetId, hSet);
++            if (!NT_SUCCESS(status)) VidPn->pfnReleaseTargetModeSet(hVidPn, hSet);
++            return status;
++        }
++    }
++#endif
+ 
+     status = set->pfnCreateNewModeInfo(hSet, &mode);
+     if (NT_SUCCESS(status))
+@@ -1383,6 +1446,34 @@
+     return NULL;
+ }
+ 
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++// 0.7.216.1230: a tuple that is not the running one but exactly one of the real modes (identity, no offsets, the mode's own
++// timing and the pitch its primary will have). Returns the mode id, or ~0 when none matches.
++static ULONG DisplayRealModeMatch(const BC250_DEVICE* Device, const D3DKMDT_VIDPN_SOURCE_MODE* Mode,
++    const D3DKMDT_VIDPN_PRESENT_PATH* Path, const D3DKMDT_VIDEO_SIGNAL_INFO* Target)
++{
++    PS5_REAL_MODE real[PS5_REAL_MODE_MAX];
++    const ULONG n = Ps5RealModes(Device, real);
++    ULONG k, scaling = ScalingFromPath(Path->ContentTransformation.Scaling);
++    if (n < 2 || Mode->Type != D3DKMDT_RMT_GRAPHICS || Path->VidPnSourceId != 0 || Path->VidPnTargetId != BC250_CHILD_UID) return ~0ul;
++    if (ScalingPinned(Path->ContentTransformation.Scaling) && scaling != BC250_SCALING_IDENTITY) return ~0ul;
++    if (Bc250RotationAngle((ULONG)Path->ContentTransformation.Rotation, Device->FullWddm) == BC250_ROTATION_REFUSED) return ~0ul;
++    if (Path->VisibleFromActiveTLOffset.cx || Path->VisibleFromActiveTLOffset.cy ||
++        Path->VisibleFromActiveBROffset.cx || Path->VisibleFromActiveBROffset.cy) return ~0ul;
++    if (!Bc250SourceModeAdmitted(Device->ComposedSourceModes, (ULONG)Mode->Format.Graphics.PixelFormat)) return ~0ul;
++    for (k = 1; k < n; ++k) {
++        const D3DKMDT_VIDEO_SIGNAL_INFO* s = &real[k].Signal;
++        if ((ULONG)Mode->Format.Graphics.PrimSurfSize.cx != real[k].Width || (ULONG)Mode->Format.Graphics.PrimSurfSize.cy != real[k].Height ||
++            (ULONG)Mode->Format.Graphics.VisibleRegionSize.cx != real[k].Width || (ULONG)Mode->Format.Graphics.VisibleRegionSize.cy != real[k].Height ||
++            Mode->Format.Graphics.Stride != Bc250SourceModeStride((ULONG)Mode->Format.Graphics.PixelFormat, real[k].Pitch)) continue;
++        if (Target->ActiveSize.cx != s->ActiveSize.cx || Target->ActiveSize.cy != s->ActiveSize.cy ||
++            Target->TotalSize.cx != s->TotalSize.cx || Target->TotalSize.cy != s->TotalSize.cy || Target->PixelRate != s->PixelRate) continue;
++        return real[k].Id;
++    }
++    return ~0ul;
++}
++#endif
++
+ static BOOLEAN DisplayInheritedModeMatches(const BC250_DEVICE* Device,
+     const D3DKMDT_VIDPN_SOURCE_MODE* Mode, const D3DKMDT_VIDPN_PRESENT_PATH* Path,
+     const D3DKMDT_VIDEO_SIGNAL_INFO* Target)
+@@ -1680,6 +1771,9 @@
+     return status;
+ }
+ 
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++#include "ps5hp/ps5-display-mode.h"   /* 0.7.216.1230: real-mode timings for the synchronous commit */
++#endif
+ #include "display_inherited_vidpn.h"
+ 
+ static NTSTATUS IsSupportedVidPnCore(_In_ const HANDLE hAdapter, _Inout_ DXGKARG_ISSUPPORTEDVIDPN* IsSupportedVidPn)
+@@ -2235,6 +2329,35 @@
+         ConnectorSnapshotRelease(snapshot);
+         return status;
+     }
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++    if (device->Modeset.InheritedFixed) {           // 0.7.216.1230 real modes: every real mode as a monitor mode
++        PS5_REAL_MODE real[PS5_REAL_MODE_MAX];
++        const ULONG n = Ps5RealModes(device, real);
++        ULONG k;
++        if (n > 1) {
++            status = STATUS_SUCCESS;
++            for (k = 0; k < n && NT_SUCCESS(status); ++k) {
++                status = Recommend->pMonitorSourceModeSetInterface->pfnCreateNewModeInfo(Recommend->hMonitorSourceModeSet, &mode);
++                if (!NT_SUCCESS(status)) break;
++                mode->VideoSignalInfo = real[k].Signal;
++                mode->ColorBasis = D3DKMDT_CB_SRGB;
++                mode->ColorCoeffDynamicRanges.FirstChannel = 8;
++                mode->ColorCoeffDynamicRanges.SecondChannel = 8;
++                mode->ColorCoeffDynamicRanges.ThirdChannel = 8;
++                mode->ColorCoeffDynamicRanges.FourthChannel = 8;
++                mode->Origin = D3DKMDT_MCO_DRIVER;
++                mode->Preference = k ? D3DKMDT_MP_NOTPREFERRED : D3DKMDT_MP_PREFERRED;
++                status = Recommend->pMonitorSourceModeSetInterface->pfnAddMode(Recommend->hMonitorSourceModeSet, mode);
++                if (!NT_SUCCESS(status)) {
++                    Recommend->pMonitorSourceModeSetInterface->pfnReleaseModeInfo(Recommend->hMonitorSourceModeSet, mode);
++                    if (status == STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET) status = STATUS_SUCCESS;
++                }
++            }
++            GuardLog("ps5 realmode: %lu monitor mode(s) recommended (0x%08X)", n, (ULONG)status);
++            return status;
++        }
++    }
++#endif
+     status = Recommend->pMonitorSourceModeSetInterface->pfnCreateNewModeInfo(Recommend->hMonitorSourceModeSet, &mode);
+     if (!NT_SUCCESS(status)) return status;
+ 
+--- a/driver/kmd/display_inherited_vidpn.h
++++ b/driver/kmd/display_inherited_vidpn.h
+@@ -21,6 +21,7 @@
+     ULONG scaling = D3DKMDT_VPPS_UNINITIALIZED;
+     ULONG rotation = D3DKMDT_VPPR_UNINITIALIZED;
+     const ULONG support = Device->Modeset.InheritedSupport;
++    ULONG realId = ~0ul;                             /* 0.7.216.1230: an admitted real mode other than the running one */
+ 
+     *Supported = FALSE;
+     if (Commit) Device->ModeActive = FALSE;
+@@ -66,7 +67,47 @@
+     }
+     if (!targetPinned) target = Device->InheritedSignal;
+     reason = DisplayInheritedModeRefusal(Device, &source, path, &target);
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++    {
++        /* 0.7.216.1230 real modes: another real mode is admitted too. A half-pinned set is checked with the matching half
++         * of that mode (the substitute above is the running mode). Commit: the mode change runs on the waiter thread. */
++        D3DKMDT_VIDPN_SOURCE_MODE src = source;
++        D3DKMDT_VIDEO_SIGNAL_INFO tgt = target;
++        PS5_REAL_MODE real[PS5_REAL_MODE_MAX];
++        ULONG n = reason ? Ps5RealModes(Device, real) : 0, k;
++        for (k = 1; k < n && reason; ++k) {
++            if (!sourcePinned) {
++                src.Format.Graphics.PrimSurfSize.cx = real[k].Width; src.Format.Graphics.PrimSurfSize.cy = real[k].Height;
++                src.Format.Graphics.VisibleRegionSize = src.Format.Graphics.PrimSurfSize;
++                src.Format.Graphics.Stride = Bc250SourceModeStride((ULONG)src.Format.Graphics.PixelFormat, real[k].Pitch);
++            }
++            if (!targetPinned) tgt = real[k].Signal;
++            realId = DisplayRealModeMatch(Device, &src, path, &tgt);
++            if (realId != ~0ul) reason = NULL;
++        }
++    }
++#endif
+     if (reason) { status = STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED; goto done; }
++#if defined(BC250_PS5) && defined(BC250_PS5_STAGE) && BC250_PS5_STAGE >= 5
++    if (Commit && realId != ~0ul) {
++        reason = "commit-pins";
++        if (!sourcePinned || !targetPinned) { status = STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED; goto done; }
++        reason = "real-mode";
++        {   /* synchronous, like a mode set on any GPU: dxgkrnl sets the new primary only after this returns (a mode change on
++             * the waiter thread raced its visibility/primary calls and Windows gave the change up). PASSIVE, no replug. */
++            const struct ps5_timing* t = &ps5_display_modes[realId].t;
++            status = Ps5HpModeChange(Device, realId, t->clock_khz, t->h, t->v);
++            GuardLog("ps5 realmode: commit %ldx%ld -> mode %lu: 0x%08X", source.Format.Graphics.PrimSurfSize.cx,
++                     source.Format.Graphics.PrimSurfSize.cy, realId, (ULONG)status);
++            if (!NT_SUCCESS(status)) { status = STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED; goto done; }
++        }
++        Device->CommittedSourceWidth = source.Format.Graphics.PrimSurfSize.cx;
++        Device->CommittedSourceHeight = source.Format.Graphics.PrimSurfSize.cy;
++        Device->CommittedSourceFormat = (ULONG)source.Format.Graphics.PixelFormat;
++        Device->ModeActive = TRUE;
++        *Supported = TRUE; goto done;
++    }
++#endif
+     if (Commit) {
+         reason = "commit-pins";
+         if (!sourcePinned || !targetPinned) { status = STATUS_GRAPHICS_VIDPN_MODALITY_NOT_SUPPORTED; goto done; }

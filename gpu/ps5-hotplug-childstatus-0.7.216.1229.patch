@@ -1,0 +1,55 @@
+# PSWloader GPU driver 0.7.216.1229 (LAB, monitor change while Windows runs): QueryChildStatus reports the PS5 replug state.
+# HW 25.11.2026: after 'indicate disconnected' dxgkrnl still saw the monitor (QueryChildStatus always said connected),
+# committed the OLD mode, and took the new mode only at the NEXT hotplug (Dell black after UGREEN->Dell). Against 0.7.216.1228
+# (ps5-hotplug-modeset-0.7.216.1228.patch applied); same build flags. Built b42aa351 (test-signed 86fb0c2b). License: see LICENSE.md.
+--- a/driver/kmd/connector.h
++++ b/driver/kmd/connector.h
+@@ -33,7 +33,8 @@
+     volatile LONG DisableSpent;
+     volatile LONG Interrupts, RxInterrupts, Workers, Discoveries, Publications;
+     volatile LONG Refusals, Notifications, NotifyFailures, Stale, Rearms;
+-    volatile LONG DiscoveryRetries;     // BD-195: discoveries repeated for one generation (CONNECTOR_DISCOVERY_TRIES)
++    volatile LONG DiscoveryRetries;
++    volatile LONG Ps5Absent;            // 0.7.216.1229: 1 between ConnectorPs5Indicate(FALSE) and (TRUE) - QueryChildStatus reports it     // BD-195: discoveries repeated for one generation (CONNECTOR_DISCOVERY_TRIES)
+     NTSTATUS LastStatus;
+     BC250_CONNECTOR_OPEN_DIAG FirstOpen;
+     BC250_CONNECTOR_TARGET_DIAG FirstAttempt;
+--- a/driver/kmd/connector.c
++++ b/driver/kmd/connector.c
+@@ -205,11 +205,13 @@
+     child.Type = StatusConnection;
+     child.ChildUid = BC250_CHILD_UID;
+     child.HotPlug.Connected = FALSE;
++    InterlockedExchange(&Device->Connector.Ps5Absent, 1);   // 0.7.216.1229: QueryChildStatus follows the indication
+     off = Device->Dxgk.DxgkCbIndicateChildStatus(Device->Dxgk.DeviceHandle, &child);
+     InterlockedIncrement(&Device->Connector.Notifications);
+     pause.QuadPart = -5000000ll;                    // 500 ms for dxgkrnl to take the monitor away
+     if (Stop == NULL || KeWaitForSingleObject(Stop, Executive, KernelMode, FALSE, &pause) == STATUS_TIMEOUT) {
+         child.HotPlug.Connected = TRUE;
++        InterlockedExchange(&Device->Connector.Ps5Absent, 0);
+         on = Device->Dxgk.DxgkCbIndicateChildStatus(Device->Dxgk.DeviceHandle, &child);
+         InterlockedIncrement(&Device->Connector.Notifications);
+     }
+@@ -228,6 +230,10 @@
+     child.Type = StatusConnection;
+     child.ChildUid = BC250_CHILD_UID;
+     child.HotPlug.Connected = Connected;
++    /* 0.7.216.1229 (HW 25.11.: Windows committed the OLD mode after "disconnected" and the new one only at the NEXT hotplug):
++     * dxgkrnl confirms an indication with QueryChildStatus, which on the PS5 always said connected - the disconnect was
++     * taken back at once and the "connected" afterwards was no change. Report the indicated state there. */
++    InterlockedExchange(&Device->Connector.Ps5Absent, Connected ? 0 : 1);
+     status = Device->Dxgk.DxgkCbIndicateChildStatus(Device->Dxgk.DeviceHandle, &child);
+     InterlockedIncrement(&Device->Connector.Notifications);
+     if (!NT_SUCCESS(status)) InterlockedIncrement(&Device->Connector.NotifyFailures);
+--- a/driver/kmd/pnp.c
++++ b/driver/kmd/pnp.c
+@@ -645,7 +645,8 @@
+     {
+     case StatusConnection:
+         ChildStatus->HotPlug.Connected = ConnectorIsEnabled((BC250_DEVICE*)MiniportDeviceContext) ?
+-            ConnectorIsConnected((BC250_DEVICE*)MiniportDeviceContext) : TRUE;
++            ConnectorIsConnected((BC250_DEVICE*)MiniportDeviceContext) :
++            !((BC250_DEVICE*)MiniportDeviceContext)->Connector.Ps5Absent;   // 0.7.216.1229: the PS5 replug state, else connected
+         return STATUS_SUCCESS;
+     case StatusRotation:
+         ChildStatus->Rotation.Angle = 0;

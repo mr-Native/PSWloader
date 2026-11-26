@@ -1,0 +1,62 @@
+; ps5btx.inf v0.7 - PS5 Bluetooth: Salina xHCI 104D:9108 + IW620 Bluetooth (USB 1286:2059) as a Bluetooth
+; extensible transport. The driver creates the child MS_BTHX_BTHMINI; Windows' inbox bthmini.inf/BthMini.sys binds it.
+; GPL-2.0-only (see ps5btx.c).
+; Signed with the PSWloader Driver Signing certificate.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGUID   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+CatalogFile = ps5btx.cat
+DriverVer   = 11/25/2026,0.7.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = PS5, NTamd64
+
+[PS5.NTamd64]
+%DevDesc% = PS5BTX, PCI\VEN_104D&DEV_9108
+
+[SourceDisksNames]
+1 = %Disk%
+
+[SourceDisksFiles]
+ps5btx.sys = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[PS5BTX]
+CopyFiles = PS5BTX.Files
+
+[PS5BTX.Files]
+ps5btx.sys
+
+[PS5BTX.HW]
+AddReg = PS5BTX.HW.Reg
+
+[PS5BTX.HW.Reg]
+HKR, , DeviceIdleEnabled, 0x00010001, 0
+HKR, "Device Parameters", AllowIdleIrpInD3, 0x00010001, 0
+
+[PS5BTX.Services]
+AddService = ps5btx, 0x00000002, PS5BTX.Service
+
+[PS5BTX.Service]
+DisplayName   = %SvcDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\ps5btx.sys
+
+[PS5BTX.Wdf]
+KmdfService = ps5btx, PS5BTX.WdfSect
+
+[PS5BTX.WdfSect]
+KmdfLibraryVersion = 1.31
+
+[Strings]
+Mfg     = "PSWloader"
+DevDesc = "PS5 USB controller for Bluetooth (Salina)"
+SvcDesc = "PS5 Bluetooth transport (ps5btx)"
+Disk    = "PSWloader drivers"

@@ -1,0 +1,13 @@
+PS5 port of amdgpu-wddm (PSWloader GPU driver: bc250kmd kernel driver, ps5gpu.inf package, D3D11 front-end changes)
+
+Required Notice: Copyright (c) 2026 D-Ogi. Licensed under the PolyForm Noncommercial License 1.0.0 (https://polyformproject.org/licenses/noncommercial/1.0.0).
+Required Notice: Unofficial community project, not affiliated with or endorsed by AMD, ASRock or Microsoft. Genuine releases are published only by D-Ogi, as source code with signed checksums (see SECURITY.md). Tester pre-releases are binary zips published by D-Ogi on the GitHub releases page of D-Ogi/amdgpu-wddm, with their SHA256 in the release notes and in manifest.json. A binary obtained anywhere else does not come from this project.
+Copyright (c) 2026 PSWloader contributors (changes for the PS5: Oberon GPU support, display handling, packaging). Licensed under the same PolyForm Noncommercial License 1.0.0 (LICENSE.md in this folder).
+
+The two "Required Notice" lines above are copied unchanged from the upstream NOTICE (D-Ogi/amdgpu-wddm, commit 5dd36cb5) and must travel with every copy of any part of this port, modified or not. This port is not a release of D-Ogi; it is a modified copy distributed by the PSWloader project.
+
+Third-party parts keep their own licenses and notices (texts in licenses/):
+- AMD sources from the Linux amdgpu driver (driver/amdgpu-import/, driver/shim/generated/, third_party/linux-amdgpu/): MIT, Copyright Advanced Micro Devices, Inc. (licenses/Linux-amdgpu-MIT.txt).
+- GPU microcode cyan_skillfish2_*.bin from linux-firmware (licenses/LICENSE.amdgpu).
+- User-mode drivers shipped unchanged from the amdgpu-wddm tester release 0.7.216.109-tester.37: Mesa/RADV (MIT, Apache-2.0, BSL-1.0, SGI-B-2.0), DXVK (zlib), vkd3d-proton (LGPL-2.1), dxil-spirv / dxbc-spirv / libdisplay-info (MIT), LLVM (Apache-2.0 WITH LLVM-exception), Vulkan headers and runtime, SPIRV-Headers, zlib, OpenVR (BSD-3-Clause), bc250-fsr4 (MIT).
+The rest of PSWloader (firmware, loader, other Windows drivers, installer) is BSD-2-Clause-Patent, GPL-2.0-only or GPL-3.0 as marked in each file; see THIRD-PARTY.md at the top of the repo.

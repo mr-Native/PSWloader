@@ -1,0 +1,27 @@
+## SPDX-License-Identifier: BSD-2-Clause-Patent
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = Ps5LogExportDxe
+  FILE_GUID = 7BCD42C7-6382-4198-ACFA-6597E0BF5260
+  MODULE_TYPE = DXE_DRIVER
+  VERSION_STRING = 1.0
+  ENTRY_POINT = Ps5LogExportEntry
+[Sources]
+  LogExportDxe.c
+[Packages]
+  MdePkg/MdePkg.dec
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  MemoryAllocationLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+[Guids]
+  gEfiEventReadyToBootGuid
+  gEfiFileInfoGuid
+[Protocols]
+  gEfiPartitionInfoProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+[Depex]
+  TRUE

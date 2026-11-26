@@ -1,0 +1,24 @@
+# build output
+build/
+out/
+*.o
+*.so
+*.efi
+*.elf
+*.bin
+*.sys
+*.cat
+*.exe
+__pycache__/
+*.pyc
+
+# never commit these
+*.pfx
+*.key
+*.crt
+certs/
+*.iso
+*.wim
+*.vhd*
+dumps/
+.export/

@@ -1,0 +1,27 @@
+# PSWloader v1.2 GPU driver 0.7.216.1228 (LAB, GitHub issue #13): hotplug mode change (K3) no longer refused on the PS5's
+# inherited route (InheritedFixed is always set there; only a scaled firmware tuple must stop it). Against 0.7.216.1227
+# (ps5-hdmi-audio-0.7.216.1227.patch applied, rebuilt bit-identical daa1e1dd); same build flags. Needs bc250kmd Parameters
+# Ps5EdidDescriptor=1 and EnableHotplugModeSet=7 plus ps5pwr >= 1.18.0 (HotplugMode 4). License: see LICENSE.md.
+--- a/driver/kmd/modeset.c	2026-11-24 23:32:51.215193331 +0100
++++ b/driver/kmd/modeset.c	2026-11-25 11:31:02.978055042 +0100
+@@ -1271,10 +1271,17 @@
+     *Generation = 0;
+     if (KeGetCurrentIrql() != PASSIVE_LEVEL) return STATUS_INVALID_DEVICE_STATE;
+     ModesetLockAcquire(m);
+-    if (m->Suspended || m->InheritedFixed || !m->Ps5Split) {
++    /* 0.7.216.1228 (25.11.2026, PSWloader v1.2, GitHub issue #13; HW lab: Dell -> UGREEN refused with "fixed 1"): on the PS5
++     * InheritedFixed is also the connector's static inherited route (connector.c, Level OFF = EnableDisplayModes 0 / the
++     * descriptor level 3 a hotplug needs), so it was always set and K3 never ran. K3 itself works on that route
++     * (ModesetPs5ModeEnd adopts the new mode as the inherited tuple). What must stop it is a firmware tuple that was
++     * scaled (source size != output size, modeset.c inherited check) - test exactly that. */
++    BOOLEAN scaled = !Device->InheritedSignalValid || Device->Post.Width != (ULONG)Device->InheritedSignal.ActiveSize.cx ||
++                     Device->Post.Height != (ULONG)Device->InheritedSignal.ActiveSize.cy;
++    if (m->Suspended || scaled || !m->Ps5Split) {
+         ModesetLockRelease(m);
+-        GuardLog("display modes: hotplug mode change refused: suspended %u fixed %u split %u", (UINT)m->Suspended,
+-                 (UINT)m->InheritedFixed, (UINT)m->Ps5Split);
++        GuardLog("display modes: hotplug mode change refused: suspended %u scaled %u (fixed %u) split %u", (UINT)m->Suspended,
++                 (UINT)scaled, (UINT)m->InheritedFixed, (UINT)m->Ps5Split);
+         return STATUS_DEVICE_NOT_READY;
+     }
+     if (!WddmPrimaryExclusiveBegin(Device, BC250_WRITER_MODESET_COMMIT, Generation)) {

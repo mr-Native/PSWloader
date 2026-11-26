@@ -1,0 +1,44 @@
+## SPDX-License-Identifier: BSD-2-Clause-Patent
+[Defines]
+  INF_VERSION = 0x00010005
+  BASE_NAME = Ps5HdmiProbeDxe
+  FILE_GUID = 1FEF6FE1-9F0F-4301-82E9-2A7D1CE86734
+  MODULE_TYPE = DXE_DRIVER
+  VERSION_STRING = 1.0
+  ENTRY_POINT = Ps5HdmiProbeEntry
+[Sources]
+  HdmiProbeDxe.c
+  icc-power.c
+  icc-hdmi.c
+  icc-edid.c
+  hdmi-commands.c
+  flava3-prepare.c
+  flava3-video.c
+  flava3-edid.c
+  verde-video.c
+  ps5-edid-info.c
+  button-keys.c
+[Packages]
+  MdePkg/MdePkg.dec
+[LibraryClasses]
+  BaseLib
+  DebugLib
+  DxeServicesTableLib
+  IoLib
+  PciExpressLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  PrintLib
+  BaseMemoryLib
+  UefiDriverEntryPoint
+[Protocols]
+  gEfiSimpleTextInProtocolGuid
+  gEfiSimpleTextInputExProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+  gEfiPartitionInfoProtocolGuid
+  gEfiResetArchProtocolGuid
+[Depex]
+  gEfiResetArchProtocolGuid
+[BuildOptions]
+  GCC:*_*_X64_CC_FLAGS = -DPS5_EDK2

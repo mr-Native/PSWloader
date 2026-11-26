@@ -1,0 +1,19 @@
+diff --git a/MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassBoot.c b/MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassBoot.c
+index 5d4fb28..cf2c370 100644
+--- a/MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassBoot.c
++++ b/MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassBoot.c
+@@ -389,6 +389,14 @@ UsbBootInquiry (
+   UsbMass->Pdt          = (UINT8)(USB_BOOT_PDT (UsbMass->InquiryData.Pdt));
+   Media->RemovableMedia = (BOOLEAN)(USB_BOOT_REMOVABLE (UsbMass->InquiryData.Removable));
+   //
++  // PS5 v1.56: the PS5 exposes its internal NVMe to the firmware as USB mass storage.
++  // If it reports as a removable medium, a normal (non-To-Go) Windows 11 install refuses
++  // to boot from it (bootmgfw 0xc000000e). Present it as a FIXED disk so a regular Windows
++  // install boots like on a PC. Log the original INQUIRY removable bit for the record.
++  //
++  DEBUG ((DEBUG_ERROR, "PS5 USB-MSD: INQUIRY removable=%u -> forcing FIXED for Windows boot\n", (UINT32)Media->RemovableMedia));
++  Media->RemovableMedia = FALSE;
++  //
+   // Set block size to the default value of 512 Bytes, in case no media is present at first time.
+   //
+   Media->BlockSize = 0x0200;

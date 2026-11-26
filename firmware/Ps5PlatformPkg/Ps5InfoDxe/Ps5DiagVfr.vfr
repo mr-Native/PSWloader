@@ -1,0 +1,26 @@
+// Ps5InfoDxe v1.2 (18.11.2026): traffic light (last verdict GREEN/ORANGE/RED, text set at runtime) and "Show log" =
+//   form 2, a read-only viewer of \PS5DIAG.LOG filled between labels 0x2000/0x2FFF (HiiUpdateForm); the old per-check
+//   lines of form 1 (label 0x1000) moved into the viewer.
+// Ps5InfoDxe v1.1 (r5.22): tab "Diagnostics" - system check (key 0x136B); the result lines are inserted after the run
+//   (label 0x1000, HiiUpdateForm), so nothing empty is shown before. v0.9 (r5.20): summary + one line per check.
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <Uefi/UefiMultiPhase.h>
+#include "../Include/Ps5PowerPreset.h"
+#define PS5_FRONT_PAGE_CLASS {0xe58809f8,0xfbc1,0x48e2,{0x88,0x3a,0xa3,0x0f,0xdc,0x4b,0x44,0x1e}}   // gEfiIfrFrontPageGuid
+#define PS5_DIAG_FORMSET_GUID {0x9c1e5f2a,0x1360,0x4e1b,{0xb0,0x5e,0x13,0x60,0x0e,0xf1,0x00,0x12}}
+formset
+  guid = PS5_DIAG_FORMSET_GUID, title = STRING_TOKEN(STR_DIAG_TITLE), help = STRING_TOKEN(STR_DIAG_HELP), classguid = PS5_FRONT_PAGE_CLASS,
+  form formid = 1, title = STRING_TOKEN(STR_DIAG_TITLE);
+    subtitle text = STRING_TOKEN(STR_DIAG_SUB);
+    text help = STRING_TOKEN(STR_DIAG_RUN_HELP), text = STRING_TOKEN(STR_DIAG_RUN), flags = INTERACTIVE, key = 0x136B;
+    text help = STRING_TOKEN(STR_DIAG_VERDICT_HELP), text = STRING_TOKEN(STR_DIAG_VERDICT);
+    text help = STRING_TOKEN(STR_DIAG_LINE_HELP), text = STRING_TOKEN(STR_DIAG_RES_L), text = STRING_TOKEN(STR_DIAG_SUMMARY);
+    subtitle text = STRING_TOKEN(STR_NULL);
+    goto 2, prompt = STRING_TOKEN(STR_DIAG_SHOWLOG), help = STRING_TOKEN(STR_DIAG_SHOWLOG_HELP);
+  endform;
+  form formid = 2, title = STRING_TOKEN(STR_DIAG_LOG_TITLE);
+    subtitle text = STRING_TOKEN(STR_DIAG_LOG_SUB);
+    label 0x2000;
+    label 0x2FFF;
+  endform;
+endformset;

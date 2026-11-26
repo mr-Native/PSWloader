@@ -1,0 +1,61 @@
+; ps5pwr.inf v1.17.2 - PS5 platform power + indicator (Sony 104D:9107 Salina glue, ICC mailbox)
+; Signed with the PSWloader Driver Signing certificate (trusted root + trusted publisher required). GPL-2.0-only (see ps5pwr.c).
+; v1.4: HDMI hotplug replay: Services\ps5pwr\Parameters\HotplugMode (DWORD 0..4, see ps5pwr.c). v1.18.0: ON by default (missing = 4),
+;   FLAVA3 and VERDE (PS5 Slim), GitHub issue #13; HotplugMode=0 switches it off.
+; v1.5-v1.9: fan target/duty/temperature zones, Tctl, SMU GFXCLK/boost (admin IOCTLs). v1.10: power button -> event
+;   Global\Ps5PowerButton, kill switch Parameters\EnablePowerButton (DWORD, default 1). v1.10.1: hotplug 720p144 recognition. v1.10.2: 128-byte bridge read.
+;   v1.17.0: PS5 Linux fan curve in the driver (FanCurve=0 switches it off). v1.16.0: restart left to the firmware (PswWarmReentry) - Windows restart lands in PSWloader, not GameOS. v1.10.3: BAPM init. v1.14.0: OC ops (forced GFX clock/voltage, CPU boost/curve/limits, only on request, reset at stop/S5/bugcheck). v1.13.2: HP_PROGRAM sets the current mode. v1.13.1: boot sink picked again after a first pick. v1.13.0: HotplugMode 4 (pick the new sink's mode, PswHotplug event, program-bridge IOCTL). v1.12.1: VERSION IOCTL (loaded version + capabilities). v1.12.0: boost window HOLD + RequestGfxclk up to 2400 MHz only on explicit request (admin IOCTL).
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGUID   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+CatalogFile = ps5pwr.cat
+DriverVer   = 11/26/2026,1.19.2.0
+PnpLockdown = 1
+
+[Manufacturer]
+%Mfg% = PS5, NTamd64
+
+[PS5.NTamd64]
+%DevDesc% = PS5PWR, PCI\VEN_104D&DEV_9107&SUBSYS_9103104D
+
+[PS5PWR.NTamd64]
+CopyFiles = PS5PWR.CopyFiles
+
+; like ps5gbe: Salina functions have no INTx pin; without MSISupported the arbiter fails (code 39)
+[PS5PWR.NTamd64.HW]
+AddReg = PS5PWR.HW.Reg
+
+[PS5PWR.HW.Reg]
+HKR, "Interrupt Management", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 1
+
+[PS5PWR.NTamd64.Services]
+AddService = ps5pwr, 2, PS5PWR.Service
+
+[PS5PWR.Service]
+DisplayName   = %DevDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\ps5pwr.sys
+
+[PS5PWR.CopyFiles]
+ps5pwr.sys
+
+[SourceDisksNames]
+1 = %DiskDesc%
+
+[SourceDisksFiles]
+ps5pwr.sys = 1
+
+[DestinationDirs]
+PS5PWR.CopyFiles = 13
+
+[Strings]
+Mfg      = "PSWloader"
+DevDesc  = "PS5 Platform Power and LED (ps5pwr)"
+DiskDesc = "ps5pwr driver"
