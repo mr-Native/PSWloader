@@ -1,4 +1,4 @@
-# PSWSetup.ps1 v0.6.4 (v0.6.4: ps5pwr update without the reinstall flag - the service points to the new file, loaded at the next start (HW 26.11.: Windows processed the flag live -> BUGCODE_USB3_DRIVER); the PSWloader Dashboard starts at every sign-in (HKLM Run "PSWloader Dashboard", -Autostart; each user can turn it off under Tools); v0.6.3: component Dashboard - PSWloader Dashboard in C:\Program Files\PSWloader with the SYSTEM tasks every user may start (check, support zip, Boot Manager restart, troubleshooting), Start-menu and desktop entry; the separate Start-menu entries "PSWloader Support" and "PSWloader UEFI Boot Manager" are gone; C:\PSWloader is writable for administrators only; v0.6.2: a failing component in phase 2 no longer stops the others; C:\ProgramData\PSWloader\setup-result.json for the first sign-in message; v0.6.1: one-time welcome window after a new installation (psw-welcome.ps1, task "PSWloader Welcome"); v0.6.0: component Bluetooth (ps5btx) and component Display - Start-menu entry "PSWloader Display" (psw-display.ps1, needs firmware r5.27) to choose the resolution; v0.5.13: before the first sign-in (-FromSetupComplete) VC_redist is no longer run - it still held "Just a moment..." with v0.5.12 (user 25.11.); task PSW-VCRedist installs it after the first sign-in in the background, the three DLLs the GPU driver needs are copied at once as before; v0.5.12: VC_redist is started directly (CreateProcess) instead of through the Windows shell - in SetupComplete the shell start never returned, so the 3-minute limit never began and "Just a moment..." stayed for 20+ minutes (user install 25.11.); the payload loses any downloaded-file mark (Zone.Identifier) first; v0.5.11: edition line also hidden by a SYSTEM task from system start (PSW-HideEditionSys); v0.5.10: Watermark also hides the edition line ("Windows 11 Pro") - task PSW-HideEdition at every sign-in as the user; v0.5.9: memory integrity (HVCI/VBS) off - issue #8 Code 39 on every PS5 driver; the x64 VC runtime DLLs the GPU user-mode driver needs go to System32 even when VC_redist hangs - black screen 0x889800B2; v0.5.8: VC_redist gets at most 3 minutes - in SetupComplete it never returned and the Windows setup screens never came; v0.5.7: SelfCheck also installs PSWWatch.ps1 + task 'PSWloader Watch' (background log C:\PSWloader\logs\watch); v0.5.6: component SelfCheck - the support tool in C:\PSWloader\selfcheck; v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
+# PSWSetup.ps1 v0.6.6 (v0.6.6: GPU sets a machine env var DXVK_CONFIG=d3d11.cachedDynamicResources=a - the dynamic constant-buffer Map(WRITE_DISCARD) that games do per draw is the dominant CPU-submit cost on this driver (~0.84us/draw vs 0.055us for the bare draw); cachedDynamicResources trims it (small but safe, effective after a reboot); v0.6.5: GPU sets AppRouter Mode=gpu-default - without it every Direct3D 11 program ran on the CPU driver at feature level 10_0 (no compute shaders; Unity games failed, issue v1.2.1); v0.6.4: ps5pwr update without the reinstall flag - the service points to the new file, loaded at the next start (HW 26.11.: Windows processed the flag live -> BUGCODE_USB3_DRIVER); the PSWloader Dashboard starts at every sign-in (HKLM Run "PSWloader Dashboard", -Autostart; each user can turn it off under Tools); v0.6.3: component Dashboard - PSWloader Dashboard in C:\Program Files\PSWloader with the SYSTEM tasks every user may start (check, support zip, Boot Manager restart, troubleshooting), Start-menu and desktop entry; the separate Start-menu entries "PSWloader Support" and "PSWloader UEFI Boot Manager" are gone; C:\PSWloader is writable for administrators only; v0.6.2: a failing component in phase 2 no longer stops the others; C:\ProgramData\PSWloader\setup-result.json for the first sign-in message; v0.6.1: one-time welcome window after a new installation (psw-welcome.ps1, task "PSWloader Welcome"); v0.6.0: component Bluetooth (ps5btx) and component Display - Start-menu entry "PSWloader Display" (psw-display.ps1, needs firmware r5.27) to choose the resolution; v0.5.13: before the first sign-in (-FromSetupComplete) VC_redist is no longer run - it still held "Just a moment..." with v0.5.12 (user 25.11.); task PSW-VCRedist installs it after the first sign-in in the background, the three DLLs the GPU driver needs are copied at once as before; v0.5.12: VC_redist is started directly (CreateProcess) instead of through the Windows shell - in SetupComplete the shell start never returned, so the 3-minute limit never began and "Just a moment..." stayed for 20+ minutes (user install 25.11.); the payload loses any downloaded-file mark (Zone.Identifier) first; v0.5.11: edition line also hidden by a SYSTEM task from system start (PSW-HideEditionSys); v0.5.10: Watermark also hides the edition line ("Windows 11 Pro") - task PSW-HideEdition at every sign-in as the user; v0.5.9: memory integrity (HVCI/VBS) off - issue #8 Code 39 on every PS5 driver; the x64 VC runtime DLLs the GPU user-mode driver needs go to System32 even when VC_redist hangs - black screen 0x889800B2; v0.5.8: VC_redist gets at most 3 minutes - in SetupComplete it never returned and the Windows setup screens never came; v0.5.7: SelfCheck also installs PSWWatch.ps1 + task 'PSWloader Watch' (background log C:\PSWloader\logs\watch); v0.5.6: component SelfCheck - the support tool in C:\PSWloader\selfcheck; v0.5.5: DefaultsV2\EnableDisplayModes stays at the catalog factory value 2 - the KMD rejects any
 #   DefaultsV2 value that differs from its compiled factory value (0xC0000182, Code 37), so a fresh install never got a first
 #   driver start; mode 0 comes from the generation override written by ps5-postboot.ps1; v0.5.4: PowerPlan also turns off USB selective suspend and USB 3 link power management (U1/U2) - HW 18.11.:
 #   with selective suspend on, an idle USB SSD (RTL9210B, UAS) on the AMD xHCI does not come back (events 129/153, no more I/O);
@@ -389,6 +389,7 @@ $Comp.Gpu = @{ Default = $true; Phase = 2   # bc250kmd v10.14 (release set v1.0,
   Detect = { [ordered]@{ KmdCurrent = Test-DriverCurrent 'bc250kmd' 'drivers/bc250kmd/bc250kmd.sys'
                          DisplayModesFactory = (Get-RegValue "$CS\Services\bc250kmd\Parameters\DefaultsV2" 'EnableDisplayModes') -eq 2
                          DesktopRouter = (Get-RegValue 'HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter' 'DwmForceCpu') -eq 0
+                         AppRouter = (Get-RegValue 'HKLM:\SOFTWARE\amdgpu-wddm\AppRouter' 'Mode') -eq 'gpu-default'
                          TdrDelay10 = (Get-RegValue "$CS\Control\GraphicsDrivers" 'TdrDelay') -eq 10 } }
   Install = {
     Install-VcRuntimeDlls   # v0.5.9: before the driver - without them DWM crash-loops (0x889800B2) until VC_redist ran
@@ -414,6 +415,11 @@ $Comp.Gpu = @{ Default = $true; Phase = 2   # bc250kmd v10.14 (release set v1.0,
     }
     Set-RegValue Gpu "$CS\Services\bc250kmd\Parameters\DefaultsV2" 'EnableDisplayModes' 2 DWord | Out-Null   # catalog factory value; KMD refuses to start otherwise (mode 0 = generation override)
     foreach ($kv in @(@('DwmForceCpu', 0), @('RequireKmdSwitches', 0), @('DirectFlipFront', 0))) { Set-RegValue Gpu 'HKLM:\SOFTWARE\amdgpu-wddm\DesktopRouter' $kv[0] $kv[1] DWord | Out-Null }
+    # v0.6.5: applications (Direct3D 10/11) on the GPU driver, Nagi's release default since b19. Absent = CPU driver, FL 10_0 only
+    Set-RegValue Gpu 'HKLM:\SOFTWARE\amdgpu-wddm\AppRouter' 'Mode' 'gpu-default' String | Out-Null
+    # v0.6.6: DXVK reads DXVK_CONFIG from the environment; cachedDynamicResources speeds the per-draw dynamic
+    # constant-buffer Map, the dominant CPU-submit cost on this driver. Machine-wide, so games inherit it after a reboot.
+    if ($PSCmdlet.ShouldProcess('DXVK_CONFIG', 'set machine env')) { [Environment]::SetEnvironmentVariable('DXVK_CONFIG', 'd3d11.cachedDynamicResources=a', 'Machine'); Log '  set machine env DXVK_CONFIG=d3d11.cachedDynamicResources=a' }
     Set-RegValue Gpu "$CS\Control\GraphicsDrivers" 'TdrDelay' 10 DWord | Out-Null; Set-RegValue Gpu "$CS\Control\GraphicsDrivers" 'TdrDdiDelay' 10 DWord | Out-Null
     foreach ($d in Get-PciDevice 'PCI\VEN_1002&DEV_13EA*') {   # HDMI audio: the inbox INF writes MSISupported=0 -> Code 12
       Set-RegValue Gpu "$CS\Enum\$($d.InstanceId)\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties" 'MSISupported' 1 DWord | Out-Null }
@@ -452,9 +458,14 @@ $Comp.Network = @{ Default = $true; Phase = 2   # ps5gbe 1.0.10.0 (0382452a), DH
   Detect = { [ordered]@{ DriverCurrent = Test-DriverCurrent 'ps5gbe' 'drivers/ps5gbe/ps5gbe.sys' } }
   Install = { if (-not (Test-DriverCurrent 'ps5gbe' 'drivers/ps5gbe/ps5gbe.sys') -or $Force) { Install-DriverPackage Network 'drivers/ps5gbe' 'ps5gbe.inf' } }
 }
-$Comp.WiFi = @{ Default = $true; Phase = 2      # ps5wifi 1.0.0 (IW620 1B4B:2B56, NDIS 6.20 Native 802.11)
+$Comp.WiFi = @{ Default = $true; Phase = 2      # ps5wifi (IW620 1B4B:2B56) + MediaTek Wi-Fi 6/6E/7 (MT7921/MT7922/MT7925)
   Detect = { [ordered]@{ DriverCurrent = Test-DriverCurrent 'ps5wifi' 'drivers/ps5wifi/ps5wifi.sys' } }
-  Install = { if ((Test-Path (Join-Path $Payload 'drivers/ps5wifi/ps5wifi.inf')) -and (-not (Test-DriverCurrent 'ps5wifi' 'drivers/ps5wifi/ps5wifi.sys') -or $Force)) { Install-DriverPackage WiFi 'drivers/ps5wifi' 'ps5wifi.inf' } }
+  Install = {
+    if ((Test-Path (Join-Path $Payload 'drivers/ps5wifi/ps5wifi.inf')) -and (-not (Test-DriverCurrent 'ps5wifi' 'drivers/ps5wifi/ps5wifi.sys') -or $Force)) { Install-DriverPackage WiFi 'drivers/ps5wifi' 'ps5wifi.inf' }
+    foreach ($mtk in @(@('drivers/mtkwl6ex', 'mtkwl6ex.inf'), @('drivers/mtkwecx', 'mtkwecx.inf'))) {
+      if (Test-Path (Join-Path $Payload "$($mtk[0])/$($mtk[1])")) { Install-DriverPackage WiFi $mtk[0] $mtk[1] }
+    }
+  }
 }
 $Comp.Storage = @{ Phase = 2
   # only when an NVMe sits in the internal M.2 slot (any vendor, PCI class 01/08/02 - reference install: SanDisk 15B7:5063; issue #12: Samsung 144D:A80C); boot-start filters, MSI limit 1.
@@ -549,13 +560,15 @@ function Get-PowerValue([string]$Sub, [string]$Setting) {   # last two hex value
   $h = [regex]::Matches(((Invoke-Tool powercfg.exe @('/q', 'SCHEME_CURRENT', $Sub, $Setting))[1]), '0x[0-9a-fA-F]{8}') | Select-Object -Last 2 | ForEach-Object { [Convert]::ToInt32($_.Value, 16) }
   return , @($h) }
 $UsbSub = '2a737441-1930-4402-8d77-b2bebba308a3'; $UsbLpm = 'd4e98f31-5ffe-4ce1-be31-1b38b384c009'   # v0.5.4
-$PowerSettings = @(@('SUB_SLEEP', 'STANDBYIDLE', 0), @('SUB_VIDEO', 'VIDEOIDLE', 0), @('SUB_SLEEP', 'HIBERNATEIDLE', 0), @('SUB_PROCESSOR', 'PROCTHROTTLEMAX', 100),
-                   @($UsbSub, '48e6b7a6-50f5-4782-a5d4-53bb8f07e226', 0), @($UsbSub, $UsbLpm, 0))   # v0.5.4: USB selective suspend off, USB 3 link power management (U1/U2) off
+$PowerSettings = @(@('SUB_SLEEP', 'STANDBYIDLE', 0), @('SUB_VIDEO', 'VIDEOIDLE', 0), @('SUB_SLEEP', 'HIBERNATEIDLE', 0),
+                   @('SUB_PROCESSOR', 'PROCTHROTTLEMIN', 100), @('SUB_PROCESSOR', 'PROCTHROTTLEMAX', 100), @('SUB_PROCESSOR', 'CPMINCORES', 100),
+                   @($UsbSub, '48e6b7a6-50f5-4782-a5d4-53bb8f07e226', 0), @($UsbSub, $UsbLpm, 0))   # v0.5.4: USB suspend/LPM off; v1.2.1: CPU min 100% + core parking off for max game clocks
 $Comp.PowerPlan = @{ Default = $true; Phase = 2   # never sleep / screen off, hibernate + fast startup off
   Detect = { $r = [ordered]@{}; foreach ($s in $PowerSettings) { $v = Get-PowerValue $s[0] $s[1]; $r[$s[1]] = ($v.Count -eq 2 -and $v[0] -eq $s[2] -and $v[1] -eq $s[2]) }
              $r.HibernateOff = -not (Test-Path "$env:SystemDrive\hiberfil.sys" -ErrorAction SilentlyContinue); $r }
   Install = {
     Invoke-Tool powercfg.exe @('-attributes', $UsbSub, $UsbLpm, '-ATTRIB_HIDE') | Out-Null   # v0.5.4: the LPM setting is hidden by default; powercfg /q lists it only when visible
+    Invoke-Tool powercfg.exe @('-attributes', 'SUB_PROCESSOR', 'CPMINCORES', '-ATTRIB_HIDE') | Out-Null   # v1.2.1: unhide Core Parking Min Cores so Detect/Install can verify 100%
     foreach ($s in $PowerSettings) { $v = Get-PowerValue $s[0] $s[1]
       if ($v.Count -eq 2 -and $v[0] -eq $s[2] -and $v[1] -eq $s[2]) { continue }
       if ($PSCmdlet.ShouldProcess("power $($s[1])", "AC/DC $($s[2])")) {
@@ -743,8 +756,9 @@ $Comp.BootMenu = @{ Default = $true; Phase = 2   # v0.5.5 (user request): Start-
 # SYSTEM task that every signed-in user may start but not change. Those tasks only run scripts from C:\Program Files\PSWloader
 # (writable for administrators only); their results go to C:\ProgramData\PSWloader\dashboard (users read only).
 $DashFiles = @(@('PSWDashboard.ps1', 'tools/dashboard/PSWDashboard.ps1'), @('PSWFix.ps1', 'tools/dashboard/PSWFix.ps1'),
+               @('PSWPowerApply.ps1', 'tools/dashboard/PSWPowerApply.ps1'),
                @('PSWSelfCheck.ps1', 'tools/selfcheck/PSWSelfCheck.ps1'), @('psw-welcome.ps1', 'scripts/psw-welcome.ps1'))
-$DashTasks = 'PSWloader Check', 'PSWloader Support Zip', 'PSWloader Boot Manager', 'PSWloader Fix'
+$DashTasks = 'PSWloader Check', 'PSWloader Support Zip', 'PSWloader Boot Manager', 'PSWloader Fix', 'PSWloader Power'
 $DashLinks = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\PSWloader Dashboard.lnk", "$env:PUBLIC\Desktop\PSWloader Dashboard.lnk"
 $DashRun = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'   # v0.6.4 (user 26.11.2026): Dashboard at every sign-in
 $DashOld = 'PSWloader Support', 'PSWloader UEFI Boot Manager', 'PSWloader Display' | ForEach-Object { "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\$_.lnk" }
@@ -777,7 +791,9 @@ $Comp.Dashboard = @{ Default = $true; Phase = 2
       # from C:\ and ProgramData); now SYSTEM and administrators write, users read
       foreach ($d in $dd, 'C:\PSWloader') {
         $ic = Invoke-Tool icacls.exe @("`"$d`"", '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX', '/Q')
-        if ($ic[0] -eq 0) { $null = Invoke-Tool icacls.exe @("`"$d\*`"", '/reset', '/T', '/C', '/Q') } else { LogWarn "icacls $d exit $($ic[0])" } } }
+        if ($ic[0] -eq 0) { $null = Invoke-Tool icacls.exe @("`"$d\*`"", '/reset', '/T', '/C', '/Q') } else { LogWarn "icacls $d exit $($ic[0])" } }
+      $prq = "$Data\power-req"; New-Item -ItemType Directory -Force $prq | Out-Null
+      $null = Invoke-Tool icacls.exe @("`"$prq`"", '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-11:(OI)(CI)M', '/Q') }
     # tasks: SYSTEM, started on demand by the Dashboard; the check also at every start, every 6 hours and when Windows logs that a
     # driver or service did not start, a service stopped unexpectedly or the display driver was reset
     $set = { param($min) New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $min) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable }
@@ -794,7 +810,8 @@ $Comp.Dashboard = @{ Default = $true; Phase = 2
       # v0.6.4 (HW 26.11.2026: a click restarted nothing - shutdown /r /fw ended with 0xCB once, not reproducible): a second try
       # after 3 s; the exit code stays the task result, the Dashboard reports it instead of doing nothing
       @{ n = 'PSWloader Boot Manager'; a = (New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command `"& '$env:SystemRoot\System32\shutdown.exe' /r /fw /t 2; if (`$LASTEXITCODE) { Start-Sleep -Seconds 3; & '$env:SystemRoot\System32\shutdown.exe' /r /fw /t 2 }; exit `$LASTEXITCODE`""); t = $null; m = 5 },
-      @{ n = 'PSWloader Fix'; a = (New-ScheduledTaskAction -Execute $ps -Argument "$psArgs `"$pf\PSWFix.ps1`""); t = $null; m = 30 })
+      @{ n = 'PSWloader Fix'; a = (New-ScheduledTaskAction -Execute $ps -Argument "$psArgs `"$pf\PSWFix.ps1`""); t = $null; m = 30 },
+      @{ n = 'PSWloader Power'; a = (New-ScheduledTaskAction -Execute $ps -Argument "$psArgs `"$pf\PSWPowerApply.ps1`""); t = $null; m = 5 })
     $svc = New-Object -ComObject Schedule.Service; $svc.Connect()
     foreach ($d in $defs) {
       if (-not $PSCmdlet.ShouldProcess($d.n, 'register task (SYSTEM, every user may start it)')) { continue }

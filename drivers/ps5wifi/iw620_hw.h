@@ -98,6 +98,10 @@
 #define CMD_802_11_ASSOCIATE    0x0012u
 #define CMD_802_11_DEAUTH       0x0024u
 #define CMD_MAC_CONTROL         0x0028u
+#define CMD_RSSI_INFO           0x00A4u
+#define CMD_TX_RATE_QUERY       0x007Fu
+#define CMD_TX_RATE_CFG         0x00D6u
+#define CMD_11N_ADDBA_RSP       0x00CFu
 #define CMD_802_11_KEY_MATERIAL 0x005Eu
 #define CMD_FUNC_INIT           0x00A9u
 #define CMD_FUNC_SHUTDOWN       0x00AAu
@@ -125,6 +129,11 @@
 #define TLV_TYPE_AUTH_TYPE      0x011Fu
 #define TLV_TYPE_KEY_MATERIAL   0x010Eu
 #define TLV_TYPE_KEY_PARAM_V2   0x019Cu  /* PROPRIETARY_TLV_BASE_ID + 156 */
+#define TLV_TYPE_VHT_CAP        191u
+#define TLV_TYPE_OPER_MODE_NTF  199u
+#define TLV_TYPE_EXTENSION_ID   255u
+#define EXT_ID_HE_CAP           35u
+#define PKT_TYPE_AMSDU          0x00E6u
 
 /* Key types & info for CMD_802_11_KEY_MATERIAL (v2) */
 #define KEY_TYPE_ID_WEP         0x00u
@@ -141,6 +150,7 @@
 #define EVENT_DEAUTHENTICATED   0x00000003u
 #define EVENT_DISASSOCIATED     0x00000004u
 #define EVENT_LINK_LOST         0x00000005u
+#define EVENT_ADDBA             0x00000033u
 
 #pragma pack(push, 1)
 
@@ -189,6 +199,10 @@ typedef struct _CMD_GET_HW_SPEC_BODY {
     UCHAR  dev_mcs_support;
     USHORT mp_end_port;
     USHORT mgmt_buf_count;
+    ULONG  reserved_8;
+    ULONG  reserved_9;
+    ULONG  dot_11ac_dev_cap;
+    ULONG  dot_11ac_mcs_support;
 } CMD_GET_HW_SPEC_BODY;
 
 typedef struct _CMD_MAC_CONTROL_BODY {

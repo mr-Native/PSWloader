@@ -32,7 +32,8 @@ function Progress([int]$Pct, [string]$Text) {
     try { New-Item -ItemType Directory -Force -Path $UpdateLogDir -ErrorAction SilentlyContinue | Out-Null
           Add-Content -LiteralPath $ProgressFile -Value "$Pct`t$Text" -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
 }
-$DriverNames = @{ 'ps5gpu.inf' = 'graphics driver'; 'ps5pwr.inf' = 'power and fan driver'; 'ps5wifi.inf' = 'Wi-Fi driver'; 'ps5gbe.inf' = 'Ethernet driver'
+$DriverNames = @{ 'ps5gpu.inf' = 'graphics driver'; 'ps5pwr.inf' = 'power and fan driver'; 'ps5wifi.inf' = 'Wi-Fi driver (IW620)'; 'ps5gbe.inf' = 'Ethernet driver'
+                  'mtkwl6ex.inf' = 'MediaTek Wi-Fi 6/6E driver'; 'mtkwecx.inf' = 'MediaTek Wi-Fi 7 driver'
                   'ps5btx.inf' = 'Bluetooth driver'; 'ps5nvmsi.inf' = 'M.2 storage driver'; 'ps5m2flt.inf' = 'M.2 storage filter'; 'ps5cmos.inf' = 'clock driver' }
 
 New-Item -ItemType Directory -Path $UpdateLogDir -Force | Out-Null
@@ -271,7 +272,13 @@ try {
         if (-not (Test-Path $r[0])) { New-Item -Path $r[0] -Force | Out-Null }
         New-ItemProperty -Path $r[0] -Name $r[1] -Value $r[2] -PropertyType DWord -Force | Out-Null
     }
-    LogOk "GPU: driver settings set (DefaultsV2, DesktopRouter, TDR) as by PSWSetup"
+    # v1.2.1: Direct3D 10/11 programs on the GPU driver (AppRouter Mode, REG_SZ). v1.2 and older never set it: every
+    # Direct3D 11 program ran on the CPU driver at feature level 10_0 (Unity games failed)
+    if (-not (Test-Path 'HKLM:\SOFTWARE\amdgpu-wddm\AppRouter')) { New-Item -Path 'HKLM:\SOFTWARE\amdgpu-wddm\AppRouter' -Force | Out-Null }
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\amdgpu-wddm\AppRouter' -Name Mode -Value 'gpu-default' -PropertyType String -Force | Out-Null
+    # v1.2.1: DXVK cachedDynamicResources (machine env) - speeds the per-draw dynamic constant-buffer Map, the dominant CPU-submit cost
+    [Environment]::SetEnvironmentVariable('DXVK_CONFIG', 'd3d11.cachedDynamicResources=a', 'Machine')
+    LogOk "GPU: driver settings set (DefaultsV2, DesktopRouter, AppRouter, TDR) as by PSWSetup"
 } catch {
     $script:Warnings++; LogWarn "GPU: could not prepare the driver prerequisites: $_"
 }
@@ -734,6 +741,25 @@ try {
     LogWarn "Could not configure auto-update checker: $_"
 }
 
+# v1.2.1: reboot cover on the following boot(s). Copy the cover script to a persistent place and register a user-session
+# logon task that shows the full-screen PSWloader "Processing updates" screen while C:\PSWSetup\Update\reboot-pending.txt
+# exists (PSWUpdater's restart writes the marker; ps5-postboot removes the marker AND this task once the update is fully
+# applied). So the unavoidable second restart for the GPU real-mode settings is covered and automatic, not a blank screen.
+try {
+    $coverSrc = Join-Path (Split-Path -Parent $PSCommandPath) 'PSWRebootScreen.ps1'
+    $coverDst = 'C:\PSWSetup\Update\PSWRebootScreen.ps1'
+    if (Test-Path $coverSrc) {
+        New-Item -ItemType Directory -Force 'C:\PSWSetup\Update' | Out-Null
+        Copy-Item $coverSrc $coverDst -Force
+        $ca = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" `
+            -Argument "--headless $env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$coverDst`""
+        $cs = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName 'PSWloader Reboot Cover' -Action $ca -Trigger (New-ScheduledTaskTrigger -AtLogOn) `
+            -Principal (New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited) -Settings $cs -Force -ErrorAction Stop | Out-Null
+        LogOk 'Reboot cover task registered (shows the PSWloader screen on the update restart[s])'
+    } else { LogWarn "Reboot cover script not found at $coverSrc" }
+} catch { LogWarn "Could not set up the reboot cover: $_" }
+
 # Record installed version
 $meta = [ordered]@{
     version         = $TargetVersion
@@ -753,9 +779,6 @@ try {
     LogWarn "Could not write $InstalledVersionPath : $_"
 }
 
-if ($script:RestartTwice) {
-    LogInfo "NOTE: the power driver (ps5pwr) is switched at the next start and loaded at the start after that - restart twice."
-}
 LogInfo "============================================================"
 LogInfo "SUMMARY: target=$TargetVersion installed=$($script:DriversInstalled) uptodate=$($script:DriversUpToDate) failed=$($script:DriversFailed) warnings=$($script:Warnings) errors=$($script:Errors)"
 LogInfo "============================================================"

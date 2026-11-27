@@ -1,5 +1,5 @@
-; ps5btx.inf v0.7 - PS5 Bluetooth: Salina xHCI 104D:9108 + IW620 Bluetooth (USB 1286:2059) as a Bluetooth
-; extensible transport. The driver creates the child MS_BTHX_BTHMINI; Windows' inbox bthmini.inf/BthMini.sys binds it.
+; ps5btx.inf v0.8 - PS5 Bluetooth: Salina xHCI 104D:9108 + onboard Bluetooth (IW620 1286:2059, MediaTek 0E8D:3603/3605)
+; as a Bluetooth extensible transport. The driver creates the child MS_BTHX_BTHMINI; Windows' inbox bthmini.inf/BthMini.sys binds it.
 ; GPL-2.0-only (see ps5btx.c).
 ; Signed with the PSWloader Driver Signing certificate.
 [Version]
@@ -8,7 +8,7 @@ Class       = System
 ClassGUID   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %Mfg%
 CatalogFile = ps5btx.cat
-DriverVer   = 11/25/2026,0.7.0.0
+DriverVer   = 11/27/2026,0.8.0.0
 PnpLockdown = 1
 
 [Manufacturer]

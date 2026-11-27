@@ -21,13 +21,23 @@ typedef char ps5_fc_size_check[sizeof(autoservo_param_sancarlo) == PS5_FC_SERVO_
 #define BOARD_D_EIGER_DENALI_1 0x3002040101000400ull
 #define BOARD_D_EIGER_DENALI_2 0x3002040101000500ull
 
-/* v1.19 (user 26.11.: the fan should be off or as quiet as in GameOS on the desktop and under light load): the minimum (10 %)
- * up to 66 C instead of a ramp from 50 C (the desktop idled at 61 C with 32 %); 70 C 30 % (was 50 %), 75 C 55 % (was 65 %),
- * from 80 C the PS5 Linux values again (80 %, 95 %, 100 %) - full load cools as before. The fan starts at 55 C (was 50 C),
- * stops below 45 C, emergency maximum at 90 C unchanged. */
-static const struct ps5_fc_curve quiet_default = {
-    { 55000, 66000, 70000, 75000, 80000, 85000, 87000, 89000 },
-    { 26, 26, 77, 140, 204, 242, 255, 255 },
+/* v1.20.0 (27.11.2026): preset-aware GameOS-quiet fan curves tuned from live GTA 5 (2219 MHz / 98% GPU) measurements.
+ * Old v1.19.2 drove 67% duty at 77 C and 80% at 80 C even though standard targets 83 C and oc targets 86 C.
+ * Each preset keeps whisper-quiet 10% up to 68 C, gentle GameOS-like 15..48% in the 72..80 C gaming band,
+ * firm cooling from 84 C upward, and unchanged emergency maximum at 90 C (91 C in oc). */
+static const struct ps5_fc_curve curve_efficiency = {
+    { 55000, 68000, 72000, 76000, 80000, 84000, 87000, 89000 },
+    { 26,    26,    26,    38,    61,    107,   173,   255 },   /* 10, 10, 10, 15, 24, 42, 68, 100 % */
+    45000,
+};
+static const struct ps5_fc_curve curve_standard = {
+    { 55000, 68000, 72000, 76000, 80000, 84000, 87000, 89000 },
+    { 26,    26,    36,    56,    87,    117,   173,   255 },   /* 10, 10, 14, 22, 34, 46, 68, 100 % */
+    45000,
+};
+static const struct ps5_fc_curve curve_oc = {
+    { 55000, 68000, 72000, 76000, 80000, 84000, 87000, 90000 },
+    { 26,    26,    41,    66,    97,    128,   184,   255 },   /* 10, 10, 16, 26, 38, 50, 72, 100 % */
     45000,
 };
 static const struct { unsigned offset, value; } quiet_servo[] = {
@@ -84,12 +94,19 @@ const uint8_t *ps5_fc_board_table(uint64_t board_id_raw, uint16_t gddr6_id, cons
     return p;
 }
 
-void ps5_fc_board_curve(struct ps5_fc_curve *c, unsigned minimum_pwm)
+void ps5_fc_preset_curve(struct ps5_fc_curve *c, unsigned preset, unsigned minimum_pwm)
 {
-    *c = quiet_default;
+    if (preset == PS5_FC_PRESET_EFFICIENCY) *c = curve_efficiency;
+    else if (preset == PS5_FC_PRESET_OC) *c = curve_oc;
+    else *c = curve_standard;
     if (minimum_pwm > 255) minimum_pwm = 255;
     for (int i = 0; i < PS5_FC_POINTS; i++)
         if (c->pwm[i] < minimum_pwm) c->pwm[i] = minimum_pwm;
+}
+
+void ps5_fc_board_curve(struct ps5_fc_curve *c, unsigned minimum_pwm)
+{
+    ps5_fc_preset_curve(c, PS5_FC_PRESET_STANDARD, minimum_pwm);
 }
 
 unsigned ps5_fc_interpolate(const struct ps5_fc_curve *c, int temp)
@@ -115,8 +132,9 @@ unsigned ps5_fc_auto_pwm(const struct ps5_fc_curve *c, int raw_temp, int filtere
 
 unsigned ps5_fc_slew(unsigned wanted, unsigned previous)
 {
-    if (wanted > previous && wanted - previous > 26) return previous + 26;
-    if (wanted < previous && previous - wanted > 13) return previous - 13;
+    /* v1.20.0: smoother acoustic ramp (+14 / -8 per 500 ms = ~5.5%/s up, ~3.1%/s down); emergency bypasses slew */
+    if (wanted > previous && wanted - previous > 14) return previous + 14;
+    if (wanted < previous && previous - wanted > 8) return previous - 8;
     return wanted;
 }
 
@@ -159,9 +177,50 @@ int ps5_fc_decode_temp(const uint8_t reply[4], int *milli)
     return 0;
 }
 
+void ps5_fc_set_preset(struct ps5_fc_state *s, unsigned preset)
+{
+    if (preset > PS5_FC_PRESET_OC) preset = PS5_FC_PRESET_STANDARD;
+    s->preset = preset;
+    s->rise_now_mc = (preset == PS5_FC_PRESET_OC) ? PS5_FC_RISE_NOW_OC_MC : PS5_FC_RISE_NOW_MC;
+    s->emergency_mc = (preset == PS5_FC_PRESET_OC) ? PS5_FC_EMERGENCY_OC_MC : PS5_FC_EMERGENCY_MC;
+    ps5_fc_preset_curve(&s->curve, preset, s->min_pwm);
+}
+
+void ps5_fc_set_custom(struct ps5_fc_state *s, const uint8_t raw[PS5_FC_CUSTOM_BYTES])
+{
+    unsigned min_p = s->min_pwm > 255 ? 255 : (s->min_pwm < 26 ? 26 : s->min_pwm);
+    struct ps5_fc_curve c;
+    int prev_t = 40;
+    unsigned prev_p = min_p;
+    for (int i = 0; i < PS5_FC_POINTS; i++) {
+        int tc = raw[i];
+        if (tc < 40) tc = 40;
+        if (tc > 89) tc = 89;
+        if (tc < prev_t) tc = prev_t;
+        prev_t = tc;
+        c.temp[i] = tc * 1000;
+        unsigned pct = raw[PS5_FC_POINTS + i];
+        if (pct > 100) pct = 100;
+        unsigned pwm = (pct * 255u + 50u) / 100u;
+        if (pwm < prev_p) pwm = prev_p;
+        if (pwm > 255) pwm = 255;
+        prev_p = pwm;
+        c.pwm[i] = pwm;
+    }
+    /* Hard thermal safety: last point always reaches 100% by <= 89 C, emergency at 90 C always active */
+    c.pwm[PS5_FC_POINTS - 1] = 255;
+    c.stop_temp = (c.temp[0] > 5000) ? c.temp[0] - 10000 : 35000;
+    if (c.stop_temp > 45000) c.stop_temp = 45000;
+    s->preset = PS5_FC_PRESET_CUSTOM;
+    s->rise_now_mc = PS5_FC_RISE_NOW_MC;
+    s->emergency_mc = PS5_FC_EMERGENCY_MC;
+    s->curve = c;
+}
+
 void ps5_fc_init(struct ps5_fc_state *s, unsigned minimum_pwm, unsigned current_pwm)
 {
-    ps5_fc_board_curve(&s->curve, minimum_pwm);
+    s->min_pwm = minimum_pwm;
+    ps5_fc_set_preset(s, PS5_FC_PRESET_STANDARD);
     s->filtered_temp = 0; s->filtered_valid = 0; s->running = 0; s->emergency = 0; s->rise_steps = 0;
     s->requested_pwm = current_pwm;
 }
@@ -170,13 +229,12 @@ int ps5_fc_step(struct ps5_fc_state *s, int temp, unsigned *pwm)
 {
     if (!s->filtered_valid) { s->filtered_temp = temp; s->filtered_valid = 1; }
     else s->filtered_temp = (3 * s->filtered_temp + temp) / 4;
-    if (temp >= PS5_FC_EMERGENCY_MC) s->emergency = 1;
-    else if (temp < PS5_FC_EMERGENCY_MC - 5000) s->emergency = 0;
+    if (temp >= s->emergency_mc) s->emergency = 1;
+    else if (temp < s->emergency_mc - 5000) s->emergency = 0;
     if (s->emergency) { *pwm = 255; return PS5_FC_MODE_MAXIMUM; }
-    unsigned p = ps5_fc_auto_pwm(&s->curve, temp, temp >= 80000 ? temp : s->filtered_temp, &s->running);
-    /* v1.19.2 (user 26.11.: the fan should not go up for short peaks): up only after the curve asked for more for 10 s in a row;
-     * down at once; from 80 C at once (the emergency maximum at 90 C above is unchanged) */
-    if (p > s->requested_pwm && temp < PS5_FC_RISE_NOW_MC) {
+    unsigned p = ps5_fc_auto_pwm(&s->curve, temp, temp >= s->rise_now_mc ? temp : s->filtered_temp, &s->running);
+    /* v1.19.2 / v1.20.0: up only after the curve asked for more for 10 s in a row; down at once; from rise_now_mc (84/85 C) at once */
+    if (p > s->requested_pwm && temp < s->rise_now_mc) {
         if (s->rise_steps < PS5_FC_RISE_HOLD_STEPS) { s->rise_steps++; p = s->requested_pwm; }
     } else s->rise_steps = 0;
     *pwm = ps5_fc_slew(p, s->requested_pwm);

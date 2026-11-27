@@ -26,7 +26,7 @@
 #include <Guid/GlobalVariable.h>   /* r5.27.4: BootNext is deleted after a whole-disk boot */
 #include "ps5-progress.h"    /* r5.27.2: progress cell for PSWloader.elf (GitHub issue #14); outside PS5_NATIVE_SETUP, the boot path uses it */
 #ifndef PS5_FW_RELEASE   /* lab builds (--lab-rev) set their own */
-#define PS5_FW_RELEASE "r5.28.14"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG, r5.25.13: SMBIOS BIOS version); bump with every build */
+#define PS5_FW_RELEASE "r5.28.15"   /* r5.20.7: the one firmware revision string (diag marker, PS5DIAG.LOG, r5.25.13: SMBIOS BIOS version); bump with every build */
 #endif
 #include "ps5-extapic.h"
 #ifdef PS5_WARM_BS_TRACE

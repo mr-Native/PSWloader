@@ -313,14 +313,17 @@ static int DeviceUp(void)
     USHORT tot = gBuf[2] | gBuf[3] << 8; gCfgVal = gBuf[5]; if (tot > 1024) tot = 1024;
     if (Control(0x80, 6, 0x0200, 0, tot, 1, NULL, &got)) return -1;
     UCHAR ifn = 0xFF, alt = 0;
+    gEpInt = gEpBin = gEpBout = 0; gMpsInt = gMpsBin = gMpsBout = 0;
     for (ULONG o = 0; o + 2 <= got && gBuf[o]; o += gBuf[o]) {
         UCHAR t = gBuf[o + 1];
         if (t == 4) { ifn = gBuf[o + 2]; alt = gBuf[o + 3]; }
         if (t == 5 && ifn == 0 && alt == 0) {
             UCHAR a = gBuf[o + 2], at = gBuf[o + 3] & 3; USHORT mps = gBuf[o + 4] | gBuf[o + 5] << 8;
-            if (at == 3 && (a & 0x80)) { gEpInt = a; gMpsInt = mps; gIvInt = gBuf[o + 6]; }
-            if (at == 2 && (a & 0x80)) { gEpBin = a; gMpsBin = mps; }
-            if (at == 2 && !(a & 0x80)) { gEpBout = a; gMpsBout = mps; }
+            /* v0.8: keep first matching HCI endpoint on IF0/Alt0 (MediaTek 0E8D:3603/3605 exposes a second
+             * interrupt IN 0x8F/mps=2 for WMT after 0x81/mps=16; never let a tiny WMT EP overwrite HCI events). */
+            if (at == 3 && (a & 0x80) && (!gEpInt || (gMpsInt < 16 && mps >= 16))) { gEpInt = a; gMpsInt = mps; gIvInt = gBuf[o + 6]; }
+            if (at == 2 && (a & 0x80) && !gEpBin) { gEpBin = a; gMpsBin = mps; }
+            if (at == 2 && !(a & 0x80) && !gEpBout) { gEpBout = a; gMpsBout = mps; }
         }
     }
     if (!gEpInt || !gEpBin || !gEpBout) { LogF("device: interface 0 endpoints missing"); return -1; }
@@ -443,7 +446,7 @@ static VOID PollThread(PVOID ctx)
     LARGE_INTEGER ms1; ms1.QuadPart = -10000; ULONG tick = 0;
     ExSetTimerResolution(10000, TRUE);
     while (!gStop) {
-        if (!gLog && tick % 1000 == 0) { LogOpen(); if (gLog) LogF("==== ps5btx v0.7 log opened late (boot start: C: was not ready)"); }   /* v0.7 */
+        if (!gLog && tick % 1000 == 0) { LogOpen(); if (gLog) LogF("==== ps5btx v0.8 log opened late (boot start: C: was not ready)"); }   /* v0.8 */
         WDFREQUEST r;
         while (NT_SUCCESS(WdfIoQueueRetrieveNextRequest(gWriteQ, &r))) {   /* v0.4: Information = sizeof(ULONG) (bytes written in the output) */
             NTSTATUS ws = DoWrite(r); WdfRequestCompleteWithInformation(r, ws, NT_SUCCESS(ws) ? sizeof(ULONG) : 0); }
@@ -516,7 +519,7 @@ static NTSTATUS CreatePdo(WDFDEVICE fdo)
     DECLARE_CONST_UNICODE_STRING(devId, L"PS5BT\\BTHX");
     DECLARE_CONST_UNICODE_STRING(hwId, L"MS_BTHX_BTHMINI");
     DECLARE_CONST_UNICODE_STRING(instId, L"0");
-    DECLARE_CONST_UNICODE_STRING(text, L"PS5 Bluetooth (IW620)");
+    DECLARE_CONST_UNICODE_STRING(text, L"PS5 Bluetooth");
     DECLARE_CONST_UNICODE_STRING(loc, L"Salina USB");
     PWDFDEVICE_INIT init = WdfPdoInitAllocate(fdo); NTSTATUS st;
     if (!init) return STATUS_INSUFFICIENT_RESOURCES;
@@ -554,7 +557,7 @@ static void FreeAll(void)
 static NTSTATUS PrepareHw(WDFDEVICE dev, WDFCMRESLIST raw, WDFCMRESLIST tr)
 {
     UNREFERENCED_PARAMETER(raw);
-    LogOpen(); LogF("==== ps5btx v0.7 start");
+    LogOpen(); LogF("==== ps5btx v0.8 start");
     for (ULONG i = 0; i < WdfCmResourceListGetCount(tr); i++) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR d = WdfCmResourceListGetDescriptor(tr, i);
         if (d->Type == CmResourceTypeMemory && !gXhci && d->u.Memory.Length >= 0x130000) {
@@ -571,9 +574,9 @@ static NTSTATUS PrepareHw(WDFDEVICE dev, WDFCMRESLIST raw, WDFCMRESLIST tr)
     if (!gSpBar2 || !gSpBar4) { FreeAll(); return STATUS_INSUFFICIENT_RESOURCES; }
     { PHYSICAL_ADDRESS lp; lp.QuadPart = 0x9bf40; volatile ULONG *p = (volatile ULONG *)MmMapIoSpace(lp, 16, MmNonCached);
       gLenWord = p ? p[1] : 0xFFFFFFFF; if (p) MmUnmapIoSpace((PVOID)p, 16); }   /* Linux: (word >> 8n) & 0x1f, no plausibility check */
-    { ULONG rev = *(volatile ULONG *)(gSpBar4 + 0x4000); gChip = (rev >> 24) == 0x11 ? 0x110000 : (rev >> 24) == 0x12 ? 0x120000 : 0; }   /* spcie_probe */
+    { ULONG rev = (*(volatile ULONG *)(gSpBar4 + 0x4000)) >> 24; gChip = (rev >= 0x11 && rev <= 0x1F) ? (rev << 16) : 0; }   /* spcie_probe: 0x11=3-port, 0x12+=1-port */
     LogF("salina chip %06x trace length word %08x", gChip, gLenWord);
-    if (gChip != 0x110000 && gChip != 0x120000) { FreeAll(); return STATUS_DEVICE_CONFIGURATION_ERROR; }
+    if (!gChip) { FreeAll(); return STATUS_DEVICE_CONFIGURATION_ERROR; }
     if (PhyInit() || XhciStart() || DeviceUp()) { LogF("start failed"); FreeAll(); return STATUS_DEVICE_NOT_READY; }
     gFifoEv.head = gFifoEv.count = gFifoAcl.head = gFifoAcl.count = 0;
     NTSTATUS st = CreatePdo(dev);

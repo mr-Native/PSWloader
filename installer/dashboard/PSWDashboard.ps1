@@ -1,4 +1,4 @@
-# PSWDashboard.ps1 v1.3 (PSWloader v1.2; v1.3: starts at every sign-in (-Autostart from PSWSetup's Run entry; switch "Start with Windows" under Tools, per user); software rendering (psw-ui v1.1); v1.2: the window appears first, the data is read in the background) - PSWloader Dashboard: one window for everything PSWloader puts on a PC.
+# PSWDashboard.ps1 v1.4 (PSWloader v1.2.1; v1.4: dynamic live refresh for Display/Monitor/Resolution, Network Wi-Fi/Ethernet, Memory, Storage/USB drives and Health via DisplaySettingsChanged + NetworkChange events + 5 s background poll; v1.3: starts at every sign-in (-Autostart from PSWSetup's Run entry; switch "Start with Windows" under Tools, per user); software rendering (psw-ui v1.1); v1.2: the window appears first, the data is read in the background) - PSWloader Dashboard: one window for everything PSWloader puts on a PC.
 #   Overview  console, PSWloader/firmware/Windows, live graphs (processor, graphics, memory, temperature + fan), hardware,
 #             storage - everything read on the PC (performance counters, CIM, PS5 thermal log, the last check)
 #   Health    the PSWloader check (PSWSelfCheck -ChecksOnly): problems and notes; checked at every start and every 6 hours,
@@ -10,7 +10,7 @@
 # ("PSWloader Check", "PSWloader Support Zip", "PSWloader Boot Manager", "PSWloader Fix", set up by PSWSetup component Dashboard).
 # Open source, part of PSWloader (https://github.com/mr-Native/PSWloader). -Preview <png> [-Page ...] renders a page with sample
 # graphs; -SelfTest <png> opens the real window, lets it read live values for 8 s, saves a picture of it and closes (test).
-param([string]$Preview = '', [ValidateSet('Overview', 'Health', 'Tools', 'Updates')][string]$Page = 'Overview', [string]$SelfTest = '', [switch]$Autostart)
+param([string]$Preview = '', [ValidateSet('Overview', 'Power', 'Health', 'Tools', 'Updates')][string]$Page = 'Overview', [string]$SelfTest = '', [switch]$Autostart)
 $ErrorActionPreference = 'SilentlyContinue'
 if ($Autostart) {   # v1.3 (user 26.11.2026): at sign-in, unless this user turned it off under Tools; never on top of the welcome window
   if ((Get-ItemProperty -Path 'HKCU:\Software\PSWloader' -Name DashboardAutostart -ErrorAction SilentlyContinue).DashboardAutostart -eq 0) { exit 0 }
@@ -234,6 +234,7 @@ $xaml = @"
       </StackPanel>
       <StackPanel>
         <RadioButton x:Name="NavOverview" Style="{StaticResource Nav}" GroupName="N" Content="Overview" IsChecked="True"/>
+        <RadioButton x:Name="NavPower" Style="{StaticResource Nav}" GroupName="N" Content="Power &amp; Fan"/>
         <RadioButton x:Name="NavHealth" Style="{StaticResource Nav}" GroupName="N" Content="Health"/>
         <RadioButton x:Name="NavTools" Style="{StaticResource Nav}" GroupName="N" Content="Tools"/>
         <RadioButton x:Name="NavUpdates" Style="{StaticResource Nav}" GroupName="N" Content="Updates"/>
@@ -261,6 +262,71 @@ $xaml = @"
           <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4"><TextBlock x:Name="DiskLive" DockPanel.Dock="Right" FontSize="11.5" Foreground="#8A8A85"/><TextBlock Style="{StaticResource Cap}" Text="STORAGE"/></DockPanel>
           <StackPanel x:Name="Disks"/></DockPanel></Border>
       </Grid>
+    </Grid>
+    <!-- power & fan -->
+    <Grid x:Name="PagePower" Visibility="Collapsed">
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+      <DockPanel Margin="0,0,0,14">
+        <Border DockPanel.Dock="Right" Background="#1F1F1F" BorderBrush="#303030" BorderThickness="1" CornerRadius="14" Padding="12,5" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal">
+            <Ellipse Width="7" Height="7" Fill="#4EC97A" VerticalAlignment="Center" Margin="0,0,7,0"/>
+            <TextBlock x:Name="FanLiveReadout" FontFamily="Segoe UI Semibold" FontSize="12.5" Foreground="#E6E6E2" VerticalAlignment="Center" Text="SoC -  &#x00B7;  Fan -"/>
+          </StackPanel>
+        </Border>
+        <TextBlock Text="Power &amp; Fan" Style="{StaticResource Head}"/>
+      </DockPanel>
+      <Border Grid.Row="1" Style="{StaticResource Card}" Padding="16,12" Margin="0,0,0,12">
+        <StackPanel>
+          <TextBlock Style="{StaticResource Cap}" Text="POWER PRESET" Margin="0,0,0,10"/>
+          <UniformGrid Rows="1" Margin="0,0,-10,0">
+            <Border x:Name="PwrEff" Background="#242424" BorderBrush="#343434" BorderThickness="1" CornerRadius="6" Padding="14,10" Margin="0,0,10,0" Cursor="Hand">
+              <StackPanel>
+                <TextBlock Text="Efficiency" FontFamily="Segoe UI Semibold" FontSize="14" Foreground="#F2F2F0"/>
+                <TextBlock Text="Lower clocks &#x00B7; Quietest &amp; coolest" FontSize="11.5" Foreground="#9A9A95" Margin="0,3,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+            <Border x:Name="PwrStd" Background="#1D2B3D" BorderBrush="#3A86E0" BorderThickness="1.5" CornerRadius="6" Padding="14,10" Margin="0,0,10,0" Cursor="Hand">
+              <StackPanel>
+                <TextBlock Text="Standard" FontFamily="Segoe UI Semibold" FontSize="14" Foreground="#FFFFFF"/>
+                <TextBlock Text="Balanced stock mode &#x00B7; Default" FontSize="11.5" Foreground="#C8DCF5" Margin="0,3,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+            <Border x:Name="PwrOc" Background="#242424" BorderBrush="#343434" BorderThickness="1" CornerRadius="6" Padding="14,10" Margin="0,0,10,0" Cursor="Hand">
+              <StackPanel>
+                <TextBlock Text="Power" FontFamily="Segoe UI Semibold" FontSize="14" Foreground="#F2F2F0"/>
+                <TextBlock Text="Full boost clocks &#x00B7; Higher thermal limit" FontSize="11.5" Foreground="#9A9A95" Margin="0,3,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+          </UniformGrid>
+        </StackPanel>
+      </Border>
+      <Border Grid.Row="2" Style="{StaticResource Card}" Padding="16,12">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <DockPanel Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="FanSilent" Style="{StaticResource Btn}" Content="Silent" Height="28" Padding="12,0" FontSize="12" Margin="0,0,6,0"/>
+              <Button x:Name="FanBalanced" Style="{StaticResource Primary}" Content="Balanced" Height="28" Padding="12,0" FontSize="12" Margin="0,0,6,0"/>
+              <Button x:Name="FanPerf" Style="{StaticResource Btn}" Content="Performance" Height="28" Padding="12,0" FontSize="12" Margin="0,0,6,0"/>
+              <Button x:Name="FanCustom" Style="{StaticResource Btn}" Content="Custom" Height="28" Padding="12,0" FontSize="12"/>
+            </StackPanel>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Style="{StaticResource Cap}" Text="FAN CURVE"/>
+              <TextBlock x:Name="FanHint" FontSize="11.5" Foreground="#8A8A85" Margin="0,2,0,0" Text="Drag points to adjust &#x00B7; Click graph to add (max 8) &#x00B7; Right-click point to remove"/>
+            </StackPanel>
+          </DockPanel>
+          <Border Grid.Row="1" Background="#161616" BorderBrush="#2C2C2C" BorderThickness="1" CornerRadius="6" Padding="4" Margin="0,0,0,12">
+            <Canvas x:Name="FanCanvas" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
+          </Border>
+          <DockPanel Grid.Row="2">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="FanReset" Style="{StaticResource Btn}" Content="Reset" Margin="0,0,8,0"/>
+              <Button x:Name="FanApply" Style="{StaticResource Primary}" Content="Apply" MinWidth="92"/>
+            </StackPanel>
+            <TextBlock x:Name="PwrStatus" FontSize="12.5" Foreground="#9A9A95" VerticalAlignment="Center" Text="Changes apply live within 1 second &#x00B7; Emergency 100 % at 90 &#x00B0;C."/>
+          </DockPanel>
+        </Grid>
+      </Border>
     </Grid>
     <!-- health -->
     <Grid x:Name="PageHealth" Visibility="Collapsed">
@@ -328,8 +394,9 @@ $xaml = @"
 </Grid>
 "@
 $root = [Windows.Markup.XamlReader]::Parse($xaml)
-$u = @{}; foreach ($n in 'SideDot','SideState','SideVersion','NavOverview','NavHealth','NavTools','NavUpdates','PageOverview','PageHealth','PageTools','PageUpdates',
+$u = @{}; foreach ($n in 'SideDot','SideState','SideVersion','NavOverview','NavPower','NavHealth','NavTools','NavUpdates','PageOverview','PagePower','PageHealth','PageTools','PageUpdates',
                       'Facts','StatusBanner','StatusDot','StatusHead','StatusText','Tiles','Specs','Disks','DiskLive',
+                      'FanLiveReadout','FanHint','PwrEff','PwrStd','PwrOc','FanSilent','FanBalanced','FanPerf','FanCustom','FanCanvas','FanReset','FanApply','PwrStatus',
                       'FixNow','CheckNow','HealthSub','HealthList','FixNote','ToolsHelp',
                       'UpdInstalled','UpdFirmware','UpdLatest','UpdLatestDate','UpdLatestCap','UpdState','UpdCheck','UpdInstall','UpdNotes','UpdBeta','UpdAuto','ToolAutostart') { $u[$n] = $root.FindName($n) }
 $bc = New-Object System.Windows.Media.BrushConverter
@@ -381,6 +448,35 @@ $i.Net = if ($na.Count) { ($na | ForEach-Object { $sp = [double]$_.Speed; "$($_.
 $i
 '@
 function Get-Info { & ([scriptblock]::Create($InfoScript)) $Data $ChecksFile }
+
+# v1.4: lightweight background refresh for dynamic hardware state (monitor/resolution, network adapters/speed,
+# storage/USB drives & free space, GPU driver/VRAM, and external checks.json updates) - never blocks the UI thread.
+$DynScript = @'
+param($ChecksFile, $LastChecksTicks)
+$d = @{}
+$vc = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.PNPDeviceID -match 'VEN_1002' } | Select-Object -First 1
+if (-not $vc) { $vc = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1 }
+if ($vc) {
+  $d.Gpu = $vc.Name; $d.GpuDriver = $vc.DriverVersion
+  $d.Display = if ($vc.CurrentHorizontalResolution) { "$($vc.CurrentHorizontalResolution) x $($vc.CurrentVerticalResolution), $($vc.CurrentRefreshRate) Hz" } else { 'no display' }
+}
+$mon = Get-CimInstance -Namespace root\wmi WmiMonitorID -ErrorAction SilentlyContinue | Select-Object -First 1
+$d.Monitor = if ($mon -and $mon.UserFriendlyName) { -join ($mon.UserFriendlyName | Where-Object { $_ } | ForEach-Object { [char]$_ }) } else { '' }
+$na = @(Get-CimInstance -Namespace root/StandardCimv2 -ClassName MSFT_NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.MediaConnectState -eq 1 -and -not $_.Virtual })
+$d.Net = if ($na.Count) { ($na | ForEach-Object { $sp = [double]$_.Speed; "$($_.Name) - $(if ($sp -ge 1e9) { '{0:0.#} Gbps' -f ($sp / 1e9) } else { '{0:0} Mbps' -f ($sp / 1e6) })" }) -join ', ' } else { 'not connected' }
+$ns = 'root/Microsoft/Windows/Storage'
+$parts = @(Get-CimInstance -Namespace $ns -ClassName MSFT_Partition -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter -and [int]$_.DriveLetter -ne 0 })
+$vols = @(Get-CimInstance -Namespace $ns -ClassName MSFT_Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter -and [int]$_.DriveLetter -ne 0 })
+$d.Disks = @(Get-CimInstance -Namespace $ns -ClassName MSFT_PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { $_.Size -gt 0 } | Sort-Object { [int]$_.DeviceId } | ForEach-Object {
+  $dn = [int]$_.DeviceId; $letters = @($parts | Where-Object { [int]$_.DiskNumber -eq $dn } | ForEach-Object { $_.DriveLetter })
+  [pscustomobject]@{ Name = $_.FriendlyName; Size = [double]$_.Size; Bus = $(switch ([int]$_.BusType) { 17 { 'NVMe' } 7 { 'USB' } 11 { 'SATA' } default { '' } })
+                     Vols = @($vols | Where-Object { $letters -contains $_.DriveLetter } | ForEach-Object { [pscustomobject]@{ DriveLetter = [string]$_.DriveLetter; Size = [double]$_.Size; SizeRemaining = [double]$_.SizeRemaining } }) } })
+$cf = Get-Item -LiteralPath $ChecksFile -ErrorAction SilentlyContinue
+if ($cf -and $cf.LastWriteTimeUtc.Ticks -gt [int64]$LastChecksTicks) {
+  try { $d.Checks = Get-Content $ChecksFile -Raw | ConvertFrom-Json; $d.ChecksTicks = $cf.LastWriteTimeUtc.Ticks } catch { }
+}
+$d
+'@
 
 # live values: Windows performance counters + the PS5 thermal log (C:\ps5-work\thermal-manager.jsonl, written by the
 # ThermalManager every few seconds: SoC temperature, fan duty, GPU clock and load). History: 60 samples, one per second.
@@ -475,30 +571,13 @@ $script:T = @{ cpu = (New-Tile 'cpu' 'Processor'); gpu = (New-Tile 'gpu' 'Graphi
 foreach ($k in 'cpu', 'gpu', 'ram', 'temp') { [void]$u.Tiles.Children.Add($script:T[$k]) }
 
 function Show-Page([string]$Name) {
-  foreach ($p in 'Overview', 'Health', 'Tools', 'Updates') { $u["Page$p"].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' } }
+  foreach ($p in 'Overview', 'Power', 'Health', 'Tools', 'Updates') { $u["Page$p"].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' } }
   $u["Nav$Name"].IsChecked = $true
+  if ($Name -eq 'Power') { Draw-FanCurve }
 }
 function Get-Uptime($Boot) { $up = (Get-Date) - $Boot; if ($up.TotalDays -ge 1) { '{0} d {1} h' -f [int][Math]::Floor($up.TotalDays), $up.Hours } else { '{0} h {1} min' -f [int][Math]::Floor($up.TotalHours), $up.Minutes } }
-function Fill-Overview($i) {
-  $con = $i.Console
-  $model = if ($con -and $con.model) { $con.model } else { 'PlayStation 5' }
-  $board = if ($con -and $con.board -and $con.board -notmatch 'unknown') { "board $($con.board)" } elseif ($con -and $con.boardId) { "board id $($con.boardId)" } else { '' }
-  $board = ((@($(if ($con -and $con.systemSoftware) { "System software $($con.systemSoftware)" }), $(if ($con -and $con.chassis) { "Chassis $($con.chassis)" }), $board) | Where-Object { $_ }) -join ', ')
-  if ($board) { $board = $board.Substring(0, 1).ToUpper() + $board.Substring(1) }
-  $fwRel = if ($i.Firmware -match '(r\d+(\.\d+)+)') { $Matches[1] } else { $i.Firmware }
-  $u.Facts.Children.Clear()
-  [void]$u.Facts.Children.Add((Fact 'Console' $model $board $true))
-  [void]$u.Facts.Children.Add((Fact 'PSWloader' $i.Version "Firmware $fwRel"))
-  [void]$u.Facts.Children.Add((Fact 'Windows' "$($i.Windows -replace '^Windows ', '') $($i.WinVer)" "Build $($i.WinBuild)"))
-  $script:UpFact = Fact 'Running for' (Get-Uptime $i.Boot) ("since " + $i.Boot.ToString('dd.MM. HH:mm')); [void]$u.Facts.Children.Add($script:UpFact)
-  $u.Specs.Children.Clear()
-  $script:CpuSpec = Spec 'Processor' "$($i.Cpu), $(if ($i.Cores) { "$($i.Cores) cores, " })$($i.Threads) threads"; [void]$u.Specs.Children.Add($script:CpuSpec)
-  [void]$u.Specs.Children.Add((Spec 'Graphics' $i.Gpu))
-  [void]$u.Specs.Children.Add((Spec 'GPU driver' ((@("$($i.GpuDriver)", $(if ($i.Vram) { "$(Size $i.Vram) video memory" })) | Where-Object { $_ }) -join ', ')))
-  [void]$u.Specs.Children.Add((Spec 'Memory' "$(Size $i.RamTotal) usable by Windows"))
-  [void]$u.Specs.Children.Add((Spec 'Display' ((@($i.Display, $i.Monitor) | Where-Object { $_ }) -join ', ')))
-  $script:NetSpec = Spec 'Network' $i.Net $true; [void]$u.Specs.Children.Add($script:NetSpec)
-  $u.Disks.Children.Clear(); $shown = @($i.Disks | Select-Object -First 3); $dn = 0
+function Fill-Disks($DiskList) {
+  $u.Disks.Children.Clear(); $shown = @($DiskList | Select-Object -First 3); $dn = 0
   foreach ($d in $shown) {
     $dn++; $row = New-Object System.Windows.Controls.Border; $row.Padding = '0,6'; if ($dn -lt $shown.Count) { $row.BorderBrush = (Br '#2A2A2A'); $row.BorderThickness = '0,0,0,1' }
     $sp = New-Object System.Windows.Controls.StackPanel
@@ -515,6 +594,27 @@ function Fill-Overview($i) {
     } else { [void]$sp.Children.Add((T "$bus, no drive letter" 11.5 '#8A8A85')) }
     $row.Child = $sp; [void]$u.Disks.Children.Add($row)
   }
+}
+function Fill-Overview($i) {
+  $con = $i.Console
+  $model = if ($con -and $con.model) { $con.model } else { 'PlayStation 5' }
+  $board = if ($con -and $con.board -and $con.board -notmatch 'unknown') { "board $($con.board)" } elseif ($con -and $con.boardId) { "board id $($con.boardId)" } else { '' }
+  $board = ((@($(if ($con -and $con.systemSoftware) { "System software $($con.systemSoftware)" }), $(if ($con -and $con.chassis) { "Chassis $($con.chassis)" }), $board) | Where-Object { $_ }) -join ', ')
+  if ($board) { $board = $board.Substring(0, 1).ToUpper() + $board.Substring(1) }
+  $fwRel = if ($i.Firmware -match '(r\d+(\.\d+)+)') { $Matches[1] } else { $i.Firmware }
+  $u.Facts.Children.Clear()
+  [void]$u.Facts.Children.Add((Fact 'Console' $model $board $true))
+  [void]$u.Facts.Children.Add((Fact 'PSWloader' $i.Version "Firmware $fwRel"))
+  [void]$u.Facts.Children.Add((Fact 'Windows' "$($i.Windows -replace '^Windows ', '') $($i.WinVer)" "Build $($i.WinBuild)"))
+  $script:UpFact = Fact 'Running for' (Get-Uptime $i.Boot) ("since " + $i.Boot.ToString('dd.MM. HH:mm')); [void]$u.Facts.Children.Add($script:UpFact)
+  $u.Specs.Children.Clear()
+  $script:CpuSpec = Spec 'Processor' "$($i.Cpu), $(if ($i.Cores) { "$($i.Cores) cores, " })$($i.Threads) threads"; [void]$u.Specs.Children.Add($script:CpuSpec)
+  $script:GpuSpec = Spec 'Graphics' $i.Gpu; [void]$u.Specs.Children.Add($script:GpuSpec)
+  $script:GpuDrvSpec = Spec 'GPU driver' ((@("$($i.GpuDriver)", $(if ($i.Vram) { "$(Size $i.Vram) video memory" })) | Where-Object { $_ }) -join ', '); [void]$u.Specs.Children.Add($script:GpuDrvSpec)
+  $script:MemSpec = Spec 'Memory' "$(Size $i.RamTotal) usable by Windows"; [void]$u.Specs.Children.Add($script:MemSpec)
+  $script:DispSpec = Spec 'Display' ((@($i.Display, $i.Monitor) | Where-Object { $_ }) -join ', '); [void]$u.Specs.Children.Add($script:DispSpec)
+  $script:NetSpec = Spec 'Network' $i.Net $true; [void]$u.Specs.Children.Add($script:NetSpec)
+  Fill-Disks $i.Disks
   $u.SideVersion.Text = "PSWloader $($i.Version)`nFirmware $fwRel"
 }
 function Update-Live([switch]$Sample) {
@@ -532,6 +632,9 @@ function Update-Live([switch]$Sample) {
     if ($null -ne $temp) { Push $script:Hist.temp $temp }
   } else { $avail = $script:Info.RamTotal * (1 - $script:Hist.ram[$script:Hist.ram.Count - 1] / 100); $dsk = 2; $rx = 14336; $tx = 3072 }
   if ($null -ne $dsk) { $u.DiskLive.Text = "activity $([int]$dsk) %" }
+  if ($script:MemSpec -and $script:Info.RamTotal -gt 0 -and $avail -gt 0) {
+    $script:MemSpec.Tag.Text = "$(Size ($script:Info.RamTotal - $avail)) / $(Size $script:Info.RamTotal) used ($(Size $avail) free)"
+  }
   if ($script:NetSpec) { $script:NetSpec.Tag.Text = "$($script:Info.Net), down $(Rate $rx), up $(Rate $tx)" }
   if ($script:UpFact) { $script:UpFact.Tag.Text = Get-Uptime $script:Info.Boot }
   $t = $script:T
@@ -545,8 +648,12 @@ function Update-Live([switch]$Sample) {
   } else { $t.gpu.Tag.Value.Text = '-'; $t.gpu.Tag.Sub.Text = 'no values from the console yet'; $t.gpu.Tag.Canvas.Children.Clear() }
   if ($th.fan -or $Sample) {
     $duty = if ($th.fan) { [int]$th.fan.duty_percent } else { 32 }
-    $t.temp.Tag.Value.Text = "{0:0} $([char]0xB0)C" -f $script:Hist.temp[$script:Hist.temp.Count - 1]; $t.temp.Tag.Sub.Text = "SoC, fan at $duty %"
+    $soc = $script:Hist.temp[$script:Hist.temp.Count - 1]
+    $t.temp.Tag.Value.Text = "{0:0} $([char]0xB0)C" -f $soc; $t.temp.Tag.Sub.Text = "SoC, fan at $duty %"
     Draw-Spark $t.temp $script:Hist.temp 30 100 "$([char]0xB0)C"
+    $script:LiveSoC = $soc; $script:LiveFan = $duty
+    $u.FanLiveReadout.Text = "SoC {0:0.0} $([char]0xB0)C  $([char]0xB7)  Fan {1} %" -f $soc, $duty
+    if ($u.PagePower.Visibility -eq 'Visible') { Draw-FanCurve }
   } else { $t.temp.Tag.Value.Text = '-'; $t.temp.Tag.Sub.Text = 'no values from the console yet'; $t.temp.Tag.Canvas.Children.Clear() }
 }
 
@@ -772,7 +879,345 @@ $u.UpdInstall.Add_Click({
   else { Start-Process "https://github.com/$Repo/releases/latest" } })
 $u.UpdNotes.Add_Click({ Start-Process "https://github.com/$Repo/releases" })
 
-$u.NavOverview.Add_Checked({ Show-Page 'Overview' }); $u.NavHealth.Add_Checked({ Show-Page 'Health' })
+# ---------------------------------------------------------------- power & fan (v1.6: interactive gaming curve editor + live apply)
+$script:PwrPreset = 'standard'
+$script:FanPreset = 1
+$script:LiveSoC = $null; $script:LiveFan = $null
+$script:FanCurvePresets = @{
+  0 = @{ t = @(55,68,72,76,80,84,87,89); d = @(10,10,10,15,24,42,68,100) }   # Silent (Efficiency)
+  1 = @{ t = @(55,68,72,76,80,84,87,89); d = @(10,10,14,22,34,46,68,100) }   # Balanced (Standard)
+  2 = @{ t = @(55,68,72,76,80,84,87,89); d = @(10,10,16,26,38,50,72,100) }   # Performance (OC)
+}
+$script:FanTemps  = [System.Collections.Generic.List[int]]::new([int[]]@(55,68,72,76,80,84,87,89))
+$script:FanDuties = [System.Collections.Generic.List[int]]::new([int[]]@(10,10,14,22,34,46,68,100))
+$script:FanDragIdx = -1
+$script:FanHoverIdx = -1
+$script:FanDirty = $false
+
+function Set-FanPoints([int[]]$Temps, [int[]]$Duties) {
+  $script:FanTemps.Clear(); $script:FanDuties.Clear()
+  $n = [Math]::Min($Temps.Count, $Duties.Count)
+  for ($i = 0; $i -lt $n; $i++) { [void]$script:FanTemps.Add([int]$Temps[$i]); [void]$script:FanDuties.Add([int]$Duties[$i]) }
+}
+function Set-PowerCardStyle($Card, [bool]$Active) {
+  $Card.Background = (Br $(if ($Active) { '#1D2B3D' } else { '#242424' }))
+  $Card.BorderBrush = (Br $(if ($Active) { $Blue } else { '#343434' }))
+  $Card.BorderThickness = if ($Active) { '1.5' } else { '1' }
+  $sp = $Card.Child
+  if ($sp -and $sp.Children.Count -ge 2) {
+    $sp.Children[0].Foreground = (Br $(if ($Active) { '#FFFFFF' } else { '#E6E6E2' }))
+    $sp.Children[1].Foreground = (Br $(if ($Active) { '#BBD6F7' } else { '#8E8E88' }))
+  }
+}
+function Update-PowerFanButtons {
+  Set-PowerCardStyle $u.PwrEff ($script:PwrPreset -eq 'efficiency')
+  Set-PowerCardStyle $u.PwrStd ($script:PwrPreset -eq 'standard')
+  Set-PowerCardStyle $u.PwrOc  ($script:PwrPreset -eq 'oc')
+  $u.FanSilent.Style   = $root.Resources[$(if ($script:FanPreset -eq 0) { 'Primary' } else { 'Btn' })]
+  $u.FanBalanced.Style = $root.Resources[$(if ($script:FanPreset -eq 1) { 'Primary' } else { 'Btn' })]
+  $u.FanPerf.Style     = $root.Resources[$(if ($script:FanPreset -eq 2) { 'Primary' } else { 'Btn' })]
+  $u.FanCustom.Style   = $root.Resources[$(if ($script:FanPreset -eq 3) { 'Primary' } else { 'Btn' })]
+}
+function Get-FanPlotMetrics {
+  $w = $u.FanCanvas.ActualWidth; $h = $u.FanCanvas.ActualHeight
+  if ($w -lt 80) { $w = 780 }; if ($h -lt 80) { $h = 300 }
+  $ml = 42.0; $mr = 18.0; $mt = 16.0; $mb = 28.0
+  @{ w = $w; h = $h; ml = $ml; mr = $mr; mt = $mt; mb = $mb; pw = ($w - $ml - $mr); ph = ($h - $mt - $mb); tMin = 35.0; tMax = 95.0 }
+}
+function Draw-FanCurve {
+  $c = $u.FanCanvas; $c.Children.Clear()
+  $m = Get-FanPlotMetrics
+  $ml = $m.ml; $mt = $m.mt; $pw = $m.pw; $ph = $m.ph; $tMin = $m.tMin; $tMax = $m.tMax
+  $xOf = { param($tc) $ml + (([Math]::Max($tMin, [Math]::Min($tMax, [double]$tc)) - $tMin) / ($tMax - $tMin)) * $pw }
+  $yOf = { param($dp) $mt + (1.0 - ([Math]::Max(0.0, [Math]::Min(100.0, [double]$dp)) / 100.0)) * $ph }
+  $cnt = $script:FanTemps.Count; if ($cnt -lt 2) { return }
+
+  # Thermal safety zone (>= 90 C)
+  $x90 = & $xOf 90
+  $safe = New-Object System.Windows.Shapes.Rectangle
+  $safe.Width = [Math]::Max(0, ($ml + $pw) - $x90); $safe.Height = $ph; $safe.Fill = (Br '#1AE5534B')
+  [System.Windows.Controls.Canvas]::SetLeft($safe, $x90); [System.Windows.Controls.Canvas]::SetTop($safe, $mt)
+  [void]$c.Children.Add($safe)
+
+  # Horizontal grid (0..100%)
+  foreach ($dp in 0, 20, 40, 60, 80, 100) {
+    $y = & $yOf $dp
+    $ln = New-Object System.Windows.Shapes.Line; $ln.X1 = $ml; $ln.X2 = $ml + $pw; $ln.Y1 = $y; $ln.Y2 = $y
+    $ln.Stroke = (Br $(if ($dp -eq 0) { '#383838' } else { '#242424' })); $ln.StrokeThickness = 1; [void]$c.Children.Add($ln)
+    $lb = T "$dp%" 10.5 '#7E7E78'; $lb.Width = 34; $lb.TextAlignment = 'Right'
+    [System.Windows.Controls.Canvas]::SetLeft($lb, 2); [System.Windows.Controls.Canvas]::SetTop($lb, $y - 7); [void]$c.Children.Add($lb)
+  }
+  # Vertical grid (40..90 C)
+  foreach ($tc in 40, 50, 60, 70, 80, 90) {
+    $x = & $xOf $tc
+    $ln = New-Object System.Windows.Shapes.Line; $ln.X1 = $x; $ln.X2 = $x; $ln.Y1 = $mt; $ln.Y2 = $mt + $ph
+    $ln.Stroke = (Br $(if ($tc -eq 90) { '#663432' } else { '#242424' })); $ln.StrokeThickness = 1; [void]$c.Children.Add($ln)
+    $lb = T "$tc$([char]0xB0)C" 10.5 $(if ($tc -eq 90) { '#E06C65' } else { '#7E7E78' })
+    [System.Windows.Controls.Canvas]::SetLeft($lb, $x - 14); [System.Windows.Controls.Canvas]::SetTop($lb, $mt + $ph + 6); [void]$c.Children.Add($lb)
+  }
+  # Curve fill + line
+  $pts = New-Object System.Windows.Media.PointCollection
+  $fill = New-Object System.Windows.Media.PointCollection
+  $x0 = & $xOf $tMin; $y0 = & $yOf $script:FanDuties[0]
+  [void]$pts.Add((New-Object System.Windows.Point($x0, $y0)))
+  [void]$fill.Add((New-Object System.Windows.Point($x0, ($mt + $ph))))
+  [void]$fill.Add((New-Object System.Windows.Point($x0, $y0)))
+  for ($i = 0; $i -lt $cnt; $i++) {
+    $pt = New-Object System.Windows.Point((& $xOf $script:FanTemps[$i]), (& $yOf $script:FanDuties[$i]))
+    [void]$pts.Add($pt); [void]$fill.Add($pt)
+  }
+  $xe = & $xOf $tMax; $ye = & $yOf 100
+  [void]$pts.Add((New-Object System.Windows.Point($xe, $ye)))
+  [void]$fill.Add((New-Object System.Windows.Point($xe, $ye)))
+  [void]$fill.Add((New-Object System.Windows.Point($xe, ($mt + $ph))))
+  $pg = New-Object System.Windows.Shapes.Polygon; $pg.Points = $fill; $pg.Fill = (Br '#283A86E0'); [void]$c.Children.Add($pg)
+  $pl = New-Object System.Windows.Shapes.Polyline; $pl.Points = $pts; $pl.Stroke = (Br $Blue); $pl.StrokeThickness = 2.5; $pl.StrokeLineJoin = 'Round'; [void]$c.Children.Add($pl)
+
+  # Live SoC / Fan crosshair + dot
+  if ($null -ne $script:LiveSoC -and $null -ne $script:LiveFan) {
+    $lx = & $xOf $script:LiveSoC; $ly = & $yOf $script:LiveFan
+    $vl = New-Object System.Windows.Shapes.Line; $vl.X1 = $lx; $vl.X2 = $lx; $vl.Y1 = $mt; $vl.Y2 = $mt + $ph
+    $vl.Stroke = (Br '#444EC97A'); $vl.StrokeThickness = 1; $vl.StrokeDashArray = [System.Windows.Media.DoubleCollection]@([double]3, [double]3); [void]$c.Children.Add($vl)
+    $hl = New-Object System.Windows.Shapes.Line; $hl.X1 = $ml; $hl.X2 = $ml + $pw; $hl.Y1 = $ly; $hl.Y2 = $ly
+    $hl.Stroke = (Br '#444EC97A'); $hl.StrokeThickness = 1; $hl.StrokeDashArray = [System.Windows.Media.DoubleCollection]@([double]3, [double]3); [void]$c.Children.Add($hl)
+    $dot = New-Object System.Windows.Shapes.Ellipse; $dot.Width = 10; $dot.Height = 10
+    $dot.Fill = (Br '#4EC97A'); $dot.Stroke = (Br '#121212'); $dot.StrokeThickness = 2
+    [System.Windows.Controls.Canvas]::SetLeft($dot, $lx - 5); [System.Windows.Controls.Canvas]::SetTop($dot, $ly - 5); [void]$c.Children.Add($dot)
+  }
+
+  # Draggable control points (last point locked at 100% duty for thermal safety)
+  $last = $cnt - 1
+  for ($i = 0; $i -lt $cnt; $i++) {
+    $px = & $xOf $script:FanTemps[$i]; $py = & $yOf $script:FanDuties[$i]
+    $active = ($i -eq $script:FanDragIdx -or $i -eq $script:FanHoverIdx)
+    if ($active) {
+      $halo = New-Object System.Windows.Shapes.Ellipse; $halo.Width = 22; $halo.Height = 22
+      $halo.Fill = (Br $(if ($i -eq $last) { '#33E5534B' } else { '#383A86E0' }))
+      [System.Windows.Controls.Canvas]::SetLeft($halo, $px - 11); [System.Windows.Controls.Canvas]::SetTop($halo, $py - 11); [void]$c.Children.Add($halo)
+    }
+    $sz = if ($active) { 13.0 } else { 11.0 }
+    $el = New-Object System.Windows.Shapes.Ellipse; $el.Width = $sz; $el.Height = $sz
+    $el.Fill = (Br $(if ($i -eq $last) { '#E5534B' } elseif ($active) { '#FFFFFF' } else { '#EAEAE5' }))
+    $el.Stroke = (Br $(if ($i -eq $last) { '#FF8A84' } else { $Blue })); $el.StrokeThickness = 2.2
+    [System.Windows.Controls.Canvas]::SetLeft($el, $px - $sz / 2); [System.Windows.Controls.Canvas]::SetTop($el, $py - $sz / 2)
+    [void]$c.Children.Add($el)
+  }
+
+  # Floating callout badge for active/hovered point
+  $ti = if ($script:FanDragIdx -ge 0) { $script:FanDragIdx } else { $script:FanHoverIdx }
+  if ($ti -ge 0 -and $ti -lt $cnt) {
+    $px = & $xOf $script:FanTemps[$ti]; $py = & $yOf $script:FanDuties[$ti]
+    $tipTxt = "P$($ti + 1)/$cnt : $($script:FanTemps[$ti]) $([char]0xB0)C  $([char]0xB7)  $($script:FanDuties[$ti]) %$(if ($ti -eq $last) { ' (max)' })"
+    $tip = New-Object System.Windows.Controls.Border; $tip.Background = (Br '#E6222222'); $tip.BorderBrush = (Br $Blue)
+    $tip.BorderThickness = 1; $tip.CornerRadius = '4'; $tip.Padding = '8,3'
+    $tip.Child = (T $tipTxt 11.5 '#FFFFFF' 'Segoe UI Semibold')
+    $tx = [Math]::Max($ml + 4, [Math]::Min($ml + $pw - 165, $px - 70))
+    $ty = if ($py -lt ($mt + 38)) { $py + 14 } else { $py - 32 }
+    [System.Windows.Controls.Canvas]::SetLeft($tip, $tx); [System.Windows.Controls.Canvas]::SetTop($tip, $ty)
+    [void]$c.Children.Add($tip)
+  }
+}
+function Find-NearestFanPoint([double]$X, [double]$Y) {
+  $m = Get-FanPlotMetrics; $best = -1; $bestD = 22.0; $cnt = $script:FanTemps.Count
+  for ($i = 0; $i -lt $cnt; $i++) {
+    $px = $m.ml + (([double]$script:FanTemps[$i] - $m.tMin) / ($m.tMax - $m.tMin)) * $m.pw
+    $py = $m.mt + (1.0 - ([double]$script:FanDuties[$i] / 100.0)) * $m.ph
+    $dist = [Math]::Sqrt(($X - $px) * ($X - $px) + ($Y - $py) * ($Y - $py))
+    if ($dist -lt $bestD) { $bestD = $dist; $best = $i }
+  }
+  $best
+}
+function Move-FanPoint([int]$Idx, [double]$X, [double]$Y) {
+  $cnt = $script:FanTemps.Count; $last = $cnt - 1
+  if ($Idx -lt 0 -or $Idx -gt $last) { return }
+  $m = Get-FanPlotMetrics
+  $tc = [int][Math]::Round($m.tMin + (($X - $m.ml) / $m.pw) * ($m.tMax - $m.tMin))
+  $dp = [int][Math]::Round((1.0 - (($Y - $m.mt) / $m.ph)) * 100.0)
+  $tLo = if ($Idx -eq 0) { 35 } else { $script:FanTemps[$Idx - 1] + 1 }
+  $tHi = if ($Idx -eq $last) { 89 } else { $script:FanTemps[$Idx + 1] - 1 }
+  $script:FanTemps[$Idx] = [Math]::Max($tLo, [Math]::Min($tHi, $tc))
+  if ($Idx -eq $last) { $script:FanDuties[$last] = 100 }
+  else {
+    $dp = [Math]::Max(10, [Math]::Min(100, $dp))
+    $script:FanDuties[$Idx] = $dp
+    for ($k = $Idx + 1; $k -lt $cnt; $k++) { if ($script:FanDuties[$k] -lt $dp) { $script:FanDuties[$k] = $dp } }
+    for ($k = $Idx - 1; $k -ge 0; $k--) { if ($script:FanDuties[$k] -gt $dp) { $script:FanDuties[$k] = $dp } }
+    $script:FanDuties[$last] = 100
+  }
+  $script:FanPreset = 3; $script:FanDirty = $true
+  Update-PowerFanButtons; Draw-FanCurve
+  $u.PwrStatus.Text = "Custom ($cnt pts) - P$($Idx + 1): $($script:FanTemps[$Idx]) $([char]0xB0)C -> $($script:FanDuties[$Idx]) % - click Apply to save."
+}
+function Add-FanPointAt([double]$X, [double]$Y) {
+  $cnt = $script:FanTemps.Count
+  if ($cnt -ge 8) { $u.PwrStatus.Text = 'Maximum 8 points reached - right-click any point to remove one first.'; return -1 }
+  $m = Get-FanPlotMetrics
+  if ($X -lt $m.ml -or $X -gt ($m.ml + $m.pw) -or $Y -lt $m.mt -or $Y -gt ($m.mt + $m.ph)) { return -1 }
+  $tc = [int][Math]::Max(35, [Math]::Min(88, [Math]::Round($m.tMin + (($X - $m.ml) / $m.pw) * ($m.tMax - $m.tMin))))
+  $dp = [int][Math]::Max(10, [Math]::Min(100, [Math]::Round((1.0 - (($Y - $m.mt) / $m.ph)) * 100.0)))
+  # Avoid exact duplicate temperature
+  if ($script:FanTemps.Contains($tc)) {
+    if (-not $script:FanTemps.Contains($tc + 1) -and ($tc + 1) -lt $script:FanTemps[$cnt - 1]) { $tc++ }
+    elseif (-not $script:FanTemps.Contains($tc - 1) -and ($tc - 1) -ge 35) { $tc-- }
+    else { return -1 }
+  }
+  $ins = 0; while ($ins -lt ($cnt - 1) -and $script:FanTemps[$ins] -lt $tc) { $ins++ }
+  $script:FanTemps.Insert($ins, $tc); $script:FanDuties.Insert($ins, $dp)
+  $cnt = $script:FanTemps.Count
+  for ($k = $ins + 1; $k -lt $cnt; $k++) { if ($script:FanDuties[$k] -lt $dp) { $script:FanDuties[$k] = $dp } }
+  for ($k = $ins - 1; $k -ge 0; $k--) { if ($script:FanDuties[$k] -gt $dp) { $script:FanDuties[$k] = $dp } }
+  $script:FanDuties[$cnt - 1] = 100
+  $script:FanPreset = 3; $script:FanDirty = $true
+  Update-PowerFanButtons; Draw-FanCurve
+  $u.PwrStatus.Text = "Added point P$($ins + 1) ($tc $([char]0xB0)C -> $dp %) - click Apply to save."
+  $ins
+}
+function Remove-FanPointAt([int]$Idx) {
+  $cnt = $script:FanTemps.Count
+  if ($cnt -le 2) { $u.PwrStatus.Text = 'At least 2 points are required.'; return }
+  if ($Idx -lt 0 -or $Idx -ge ($cnt - 1)) { $u.PwrStatus.Text = 'The 100 % thermal safety point cannot be removed.'; return }
+  $script:FanTemps.RemoveAt($Idx); $script:FanDuties.RemoveAt($Idx)
+  $script:FanHoverIdx = -1; $script:FanPreset = 3; $script:FanDirty = $true
+  Update-PowerFanButtons; Draw-FanCurve
+  $u.PwrStatus.Text = "Removed point ($($script:FanTemps.Count) pts left) - click Apply to save."
+}
+function Export-FanCurve8 {
+  # Resample 2..8 user points cleanly to the 8 monotonic points ps5pwr.sys expects (40..89 C, 10..100%)
+  $cnt = $script:FanTemps.Count
+  $tOut = New-Object int[] 8; $dOut = New-Object int[] 8
+  if ($cnt -eq 8) {
+    for ($i = 0; $i -lt 8; $i++) { $tOut[$i] = [Math]::Max(40, [Math]::Min(89, $script:FanTemps[$i])); $dOut[$i] = $script:FanDuties[$i] }
+  } else {
+    $t0 = [double]$script:FanTemps[0]; $tN = [double]$script:FanTemps[$cnt - 1]
+    for ($i = 0; $i -lt 8; $i++) {
+      $tc = if ($i -eq 0) { $t0 } elseif ($i -eq 7) { $tN } else { $t0 + ($tN - $t0) * ($i / 7.0) }
+      $j = 0; while ($j -lt ($cnt - 2) -and $script:FanTemps[$j + 1] -lt $tc) { $j++ }
+      $xa = [double]$script:FanTemps[$j]; $xb = [double]$script:FanTemps[$j + 1]
+      $ya = [double]$script:FanDuties[$j]; $yb = [double]$script:FanDuties[$j + 1]
+      $f = if ($xb -gt $xa) { [Math]::Max(0.0, [Math]::Min(1.0, ($tc - $xa) / ($xb - $xa))) } else { 0.0 }
+      $tOut[$i] = [int][Math]::Max(40, [Math]::Min(89, [Math]::Round($tc)))
+      $dOut[$i] = [int][Math]::Max(10, [Math]::Min(100, [Math]::Round($ya + $f * ($yb - $ya))))
+    }
+  }
+  $dOut[7] = 100
+  @($tOut + $dOut)
+}
+function Load-PowerFanState {
+  $pwrKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\ps5pwr\Parameters'
+  try {
+    $fp = (Get-ItemProperty -Path $pwrKey -Name 'FanPreset' -EA SilentlyContinue).FanPreset
+    if ($null -ne $fp -and [int]$fp -ge 0 -and [int]$fp -le 3) { $script:FanPreset = [int]$fp }
+    $bin = (Get-ItemProperty -Path $pwrKey -Name 'FanCustomCurve' -EA SilentlyContinue).FanCustomCurve
+    if ($script:FanPreset -eq 3 -and $bin -and $bin.Length -eq 16) {
+      Set-FanPoints @(0..7 | ForEach-Object { [int]$bin[$_] }) @(8..15 | ForEach-Object { [int]$bin[$_] })
+    } elseif ($script:FanCurvePresets.ContainsKey($script:FanPreset)) {
+      Set-FanPoints $script:FanCurvePresets[$script:FanPreset].t $script:FanCurvePresets[$script:FanPreset].d
+    }
+  } catch { }
+  try {
+    $stFile = "$DashData\power-state.json"
+    if (Test-Path -LiteralPath $stFile) {
+      $st = Get-Content -LiteralPath $stFile -Raw | ConvertFrom-Json
+      if ($st.powerPreset -in 'efficiency','standard','oc') { $script:PwrPreset = [string]$st.powerPreset }
+      if ($script:FanPreset -eq 3 -and $st.customTemps -and $st.customDuties -and @($st.customTemps).Count -ge 2) {
+        Set-FanPoints @($st.customTemps | ForEach-Object { [int]$_ }) @($st.customDuties | ForEach-Object { [int]$_ })
+      }
+    } else {
+      $tmLog = 'C:\ps5-work\thermal-manager.jsonl'
+      if (Test-Path -LiteralPath $tmLog) {
+        $pl = Select-String -Path $tmLog -Pattern '"event":"preset"' | Select-Object -Last 1
+        if ($pl -and $pl.Line -match '"preset":"(efficiency|standard|oc)"') { $script:PwrPreset = $Matches[1] }
+      }
+    }
+  } catch { }
+  Update-PowerFanButtons; Draw-FanCurve
+}
+function Apply-PowerFan {
+  $u.PwrStatus.Text = 'Applying ...'
+  $reqDir = "$Data\power-req"; $reqFile = "$reqDir\request.json"
+  try { if (-not (Test-Path -LiteralPath $reqDir)) { New-Item -ItemType Directory -Force $reqDir | Out-Null } } catch { }
+  $payload = [ordered]@{
+    powerPreset  = $script:PwrPreset
+    fanPreset    = $script:FanPreset
+    customCurve  = @(Export-FanCurve8)
+    customTemps  = @($script:FanTemps.ToArray())
+    customDuties = @($script:FanDuties.ToArray())
+  }
+  try { Set-Content -LiteralPath $reqFile -Value ($payload | ConvertTo-Json -Compress) -Encoding UTF8 }
+  catch { $u.PwrStatus.Text = "Could not write request: $($_.Exception.Message)"; return }
+  $pLabel = switch ($script:PwrPreset) { 'efficiency' { 'Efficiency' } 'oc' { 'Power' } default { 'Standard' } }
+  $fLabel = @('Silent','Balanced','Performance','Custom')[$script:FanPreset]
+  if (Start-UserTask 'PSWloader Power') {
+    $script:FanDirty = $false
+    $u.PwrStatus.Text = "Active: $pLabel  $([char]0xB7)  Fan: $fLabel (applied live)."
+  } else {
+    $helper = @("$PSScriptRoot\PSWPowerApply.ps1", "$env:ProgramFiles\PSWloader\PSWPowerApply.ps1") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($helper) {
+      try {
+        Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$helper`" -RequestFile `"$reqFile`""
+        $script:FanDirty = $false
+        $u.PwrStatus.Text = "Active: $pLabel  $([char]0xB7)  Fan: $fLabel (applied live)."
+      } catch { $u.PwrStatus.Text = 'Cancelled or administrator rights required.' }
+    } else { $u.PwrStatus.Text = 'PSWloader Power task missing - run the PSWloader updater once.' }
+  }
+}
+$u.FanCanvas.Add_SizeChanged({ if ($u.PagePower.Visibility -eq 'Visible') { Draw-FanCurve } })
+$u.FanCanvas.Add_MouseLeftButtonDown({
+  $_.Handled = $true
+  $pos = $_.GetPosition($u.FanCanvas)
+  $idx = Find-NearestFanPoint $pos.X $pos.Y
+  if ($idx -lt 0) { $idx = Add-FanPointAt $pos.X $pos.Y }
+  if ($idx -ge 0) {
+    $script:FanDragIdx = $idx
+    [void]$u.FanCanvas.CaptureMouse()
+    Draw-FanCurve
+  }
+})
+$u.FanCanvas.Add_MouseRightButtonDown({
+  $_.Handled = $true
+  $pos = $_.GetPosition($u.FanCanvas)
+  $idx = Find-NearestFanPoint $pos.X $pos.Y
+  if ($idx -ge 0) { Remove-FanPointAt $idx }
+})
+$u.FanCanvas.Add_MouseMove({
+  $pos = $_.GetPosition($u.FanCanvas)
+  if ($script:FanDragIdx -ge 0) {
+    $_.Handled = $true
+    Move-FanPoint $script:FanDragIdx $pos.X $pos.Y
+  } else {
+    $h = Find-NearestFanPoint $pos.X $pos.Y
+    if ($h -ne $script:FanHoverIdx) {
+      $script:FanHoverIdx = $h
+      $u.FanCanvas.Cursor = if ($h -ge 0) { [System.Windows.Input.Cursors]::Hand } else { [System.Windows.Input.Cursors]::Cross }
+      Draw-FanCurve
+    }
+  }
+})
+$u.FanCanvas.Add_MouseLeftButtonUp({
+  if ($script:FanDragIdx -ge 0) {
+    $_.Handled = $true
+    $script:FanDragIdx = -1
+    $u.FanCanvas.ReleaseMouseCapture()
+    Draw-FanCurve
+  }
+})
+$u.FanCanvas.Add_MouseLeave({
+  if ($script:FanDragIdx -lt 0 -and $script:FanHoverIdx -ge 0) {
+    $script:FanHoverIdx = -1; Draw-FanCurve
+  }
+})
+$u.PwrEff.Add_MouseLeftButtonDown({ $_.Handled = $true; $script:PwrPreset = 'efficiency'; if ($script:FanPreset -ne 3) { $script:FanPreset = 0; Set-FanPoints $script:FanCurvePresets[0].t $script:FanCurvePresets[0].d }; Update-PowerFanButtons; Draw-FanCurve; Apply-PowerFan })
+$u.PwrStd.Add_MouseLeftButtonDown({ $_.Handled = $true; $script:PwrPreset = 'standard'; if ($script:FanPreset -ne 3) { $script:FanPreset = 1; Set-FanPoints $script:FanCurvePresets[1].t $script:FanCurvePresets[1].d }; Update-PowerFanButtons; Draw-FanCurve; Apply-PowerFan })
+$u.PwrOc.Add_MouseLeftButtonDown({ $_.Handled = $true; $script:PwrPreset = 'oc'; if ($script:FanPreset -ne 3) { $script:FanPreset = 2; Set-FanPoints $script:FanCurvePresets[2].t $script:FanCurvePresets[2].d }; Update-PowerFanButtons; Draw-FanCurve; Apply-PowerFan })
+$u.FanSilent.Add_Click({ $script:FanPreset = 0; Set-FanPoints $script:FanCurvePresets[0].t $script:FanCurvePresets[0].d; Update-PowerFanButtons; Draw-FanCurve; Apply-PowerFan })
+$u.FanBalanced.Add_Click({ $script:FanPreset = 1; Set-FanPoints $script:FanCurvePresets[1].t $script:FanCurvePresets[1].d; Update-PowerFanButtons; Draw-FanCurve; Apply-PowerFan })
+$u.FanPerf.Add_Click({ $script:FanPreset = 2; Set-FanPoints $script:FanCurvePresets[2].t $script:FanCurvePresets[2].d; Update-PowerFanButtons; Draw-FanCurve; Apply-PowerFan })
+$u.FanCustom.Add_Click({ $script:FanPreset = 3; Update-PowerFanButtons; Draw-FanCurve; $u.PwrStatus.Text = 'Drag points, click to add (max 8), right-click to remove, then Apply.' })
+$u.FanReset.Add_Click({ $p = if ($script:PwrPreset -eq 'efficiency') { 0 } elseif ($script:PwrPreset -eq 'oc') { 2 } else { 1 }; $script:FanPreset = $p; Set-FanPoints $script:FanCurvePresets[$p].t $script:FanCurvePresets[$p].d; Update-PowerFanButtons; Draw-FanCurve; Apply-PowerFan })
+$u.FanApply.Add_Click({ Apply-PowerFan })
+Load-PowerFanState
+
+$u.NavOverview.Add_Checked({ Show-Page 'Overview' }); $u.NavPower.Add_Checked({ Show-Page 'Power' }); $u.NavHealth.Add_Checked({ Show-Page 'Health' })
 $u.NavTools.Add_Checked({ Show-Page 'Tools' }); $u.NavUpdates.Add_Checked({ Show-Page 'Updates' })
 $u.StatusBanner.Add_MouseLeftButtonUp({ Show-Page 'Health' })
 
@@ -799,18 +1244,29 @@ if ($Preview) {
 $w = New-Object System.Windows.Window
 $w.Title = 'PSWloader Dashboard'; $w.Content = $root; $w.SizeToContent = 'WidthAndHeight'; $w.ResizeMode = 'CanMinimize'; $w.WindowStartupLocation = 'CenterScreen'
 # on a small desktop (a TV at 720p, or 4K at 300 % scaling = 1280 x 720) the whole window is scaled down to fit above the taskbar
-$wa = [System.Windows.SystemParameters]::WorkArea; $fit = [Math]::Min(1.0, [Math]::Min(($wa.Width - 16) / 1100, ($wa.Height - 16) / 720))
-if ($fit -lt 1 -and $fit -gt 0.3) { $root.LayoutTransform = New-Object System.Windows.Media.ScaleTransform($fit, $fit) }
+function Update-WindowScale {
+  $wa = [System.Windows.SystemParameters]::WorkArea; $fit = [Math]::Min(1.0, [Math]::Min(($wa.Width - 16) / 1100, ($wa.Height - 16) / 720))
+  $root.LayoutTransform = if ($fit -lt 1 -and $fit -gt 0.3) { New-Object System.Windows.Media.ScaleTransform($fit, $fit) } else { $null }
+}
+Update-WindowScale
 $ico = "$Data\icons\psw-dashboard.ico"; if (Test-Path $ico) { try { $w.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]$ico) } catch { } }
 $script:LiveTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:LiveTimer.Interval = [TimeSpan]::FromSeconds(1)
 $script:LiveTimer.Add_Tick({ if ($u.PageOverview.Visibility -eq 'Visible' -and $w.WindowState -ne 'Minimized') { Update-Live } else { $null = Update-Live } })
 # the window comes first; three background runspaces read the data (info, performance counters, number of cores) and a
 # timer puts each result on the pages when it is there
 $u.HealthSub.Text = 'Reading ...'; $u.StatusHead.Text = 'Reading ...'; $u.SideState.Text = 'Reading ...'
-$script:Bg = @{}
+$script:Bg = @{}; $script:LastChecksTicks = [int64]0; $script:DynPending = $false
 function Start-Bg([string]$Name, [string]$Script, [object[]]$BgArgs = @()) {
+  if ($script:Bg.ContainsKey($Name)) { return }
   $ps = [powershell]::Create(); [void]$ps.AddScript($Script); foreach ($a in $BgArgs) { [void]$ps.AddArgument($a) }
-  $script:Bg[$Name] = @{ Ps = $ps; Handle = $ps.BeginInvoke() } }
+  $script:Bg[$Name] = @{ Ps = $ps; Handle = $ps.BeginInvoke() }
+  if (-not $script:BgTimer.IsEnabled) { $script:BgTimer.Start() } }
+function Start-DynRefresh {
+  if (-not $script:Info -or $script:Bg.ContainsKey('dyn')) { return }
+  Start-Bg 'dyn' $DynScript @($ChecksFile, $script:LastChecksTicks) }
+$script:DynTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:DynTimer.Interval = [TimeSpan]::FromSeconds(5)
+$script:DynTimer.Add_Tick({
+  if ($script:Info -and $w.WindowState -ne 'Minimized') { Start-DynRefresh } })
 $script:BgTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:BgTimer.Interval = [TimeSpan]::FromMilliseconds(120)
 $script:BgTimer.Add_Tick({
   foreach ($n in @($script:Bg.Keys)) {
@@ -819,22 +1275,56 @@ $script:BgTimer.Add_Tick({
     if ($n -eq 'info') {
       $script:Info = if ($res) { $res } else { Get-Info }
       if ($script:Cores) { $script:Info.Cores = $script:Cores }
+      $cf0 = Get-Item -LiteralPath $ChecksFile -ErrorAction SilentlyContinue
+      if ($cf0) { $script:LastChecksTicks = $cf0.LastWriteTimeUtc.Ticks }
       Show-Info
       # a fresh check in the background when the last one is older than an hour
-      $cf0 = Get-Item -LiteralPath $ChecksFile -ErrorAction SilentlyContinue
       if (-not $cf0 -or $cf0.LastWriteTime -lt (Get-Date).AddHours(-1)) { Start-Check }
     } elseif ($n -eq 'counters') { $script:Pc = if ($res) { $res } else { New-Counters } }
     elseif ($n -eq 'cores') { $script:Cores = [int]$res; if ($script:Info -and $script:Cores) { $script:Info.Cores = $script:Cores; if ($script:CpuSpec) { $script:CpuSpec.Tag.Text = "$($script:Info.Cpu), $($script:Cores) cores, $($script:Info.Threads) threads" } } }
+    elseif ($n -eq 'dyn' -and $res -and $script:Info) {
+      # v1.4: apply live hardware updates (Display/Monitor, Network, GPU, Storage, Health) without rebuilding the whole page
+      if ($res.Display) {
+        $script:Info.Display = $res.Display; $script:Info.Monitor = $res.Monitor
+        if ($script:DispSpec) { $script:DispSpec.Tag.Text = ((@($res.Display, $res.Monitor) | Where-Object { $_ }) -join ', ') }
+      }
+      if ($res.Gpu) { $script:Info.Gpu = $res.Gpu; if ($script:GpuSpec) { $script:GpuSpec.Tag.Text = $res.Gpu } }
+      if ($res.GpuDriver) {
+        $script:Info.GpuDriver = $res.GpuDriver
+        if ($script:GpuDrvSpec) { $script:GpuDrvSpec.Tag.Text = ((@("$($res.GpuDriver)", $(if ($script:Info.Vram) { "$(Size $script:Info.Vram) video memory" })) | Where-Object { $_ }) -join ', ') }
+      }
+      if ($res.Net) {
+        $netChanged = ($res.Net -ne $script:Info.Net)
+        $script:Info.Net = $res.Net
+        if ($netChanged) { Start-Bg 'counters' $CounterScript }
+      }
+      if ($res.Disks) { $script:Info.Disks = $res.Disks; Fill-Disks $res.Disks }
+      if ($res.Checks) { $script:Info.Checks = $res.Checks; $script:LastChecksTicks = [int64]$res.ChecksTicks; Fill-Health $script:Info }
+    }
   }
-  if ($script:Info -and $script:Pc -and -not $script:LiveTimer.IsEnabled) { Update-Live; $script:LiveTimer.Start() }
+  if ($script:Info -and $script:Pc -and -not $script:LiveTimer.IsEnabled) { Update-Live; $script:LiveTimer.Start(); $script:DynTimer.Start() }
   if (-not $script:Bg.Count) { $script:BgTimer.Stop() }
 })
+# Instant OS notifications for display/resolution changes and network connect/disconnect/IP changes
+$script:OnDispChange = [EventHandler]{
+  try { $w.Dispatcher.BeginInvoke([Action]{ Update-WindowScale; Start-DynRefresh }) | Out-Null } catch { } }
+$script:OnNetAddr = [System.Net.NetworkInformation.NetworkAddressChangedEventHandler]{
+  try { $w.Dispatcher.BeginInvoke([Action]{ Start-DynRefresh }) | Out-Null } catch { } }
+$script:OnNetAvail = [System.Net.NetworkInformation.NetworkAvailabilityChangedEventHandler]{
+  try { $w.Dispatcher.BeginInvoke([Action]{ Start-DynRefresh }) | Out-Null } catch { } }
+try { [Microsoft.Win32.SystemEvents]::add_DisplaySettingsChanged($script:OnDispChange) } catch { }
+try { [System.Net.NetworkInformation.NetworkChange]::add_NetworkAddressChanged($script:OnNetAddr) } catch { }
+try { [System.Net.NetworkInformation.NetworkChange]::add_NetworkAvailabilityChanged($script:OnNetAvail) } catch { }
 $w.Add_ContentRendered({
   $script:TWin = [int]((Get-Date) - $script:T0).TotalMilliseconds
   Start-Bg 'info' $InfoScript @($Data, $ChecksFile); Start-Bg 'counters' $CounterScript
   Start-Bg 'cores' '(Get-CimInstance Win32_Processor | Measure-Object NumberOfCores -Sum).Sum'
   $script:BgTimer.Start() })
-$w.Add_Closed({ $script:LiveTimer.Stop(); $script:BgTimer.Stop() })
+$w.Add_Closed({
+  $script:LiveTimer.Stop(); $script:DynTimer.Stop(); $script:BgTimer.Stop()
+  try { [Microsoft.Win32.SystemEvents]::remove_DisplaySettingsChanged($script:OnDispChange) } catch { }
+  try { [System.Net.NetworkInformation.NetworkChange]::remove_NetworkAddressChanged($script:OnNetAddr) } catch { }
+  try { [System.Net.NetworkInformation.NetworkChange]::remove_NetworkAvailabilityChanged($script:OnNetAvail) } catch { } })
 Set-PswDarkTitle $w
 if ($SelfTest) {
   $script:TestTimer = New-Object System.Windows.Threading.DispatcherTimer; $script:TestTimer.Interval = [TimeSpan]::FromSeconds(8)

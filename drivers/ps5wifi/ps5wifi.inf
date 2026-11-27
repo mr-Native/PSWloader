@@ -6,7 +6,7 @@ Class       = Net
 ClassGUID   = {4d36e972-e325-11ce-bfc1-08002be10318}
 Provider    = %Mfg%
 CatalogFile = ps5wifi.cat
-DriverVer   = 11/25/2026,1.0.7.0
+DriverVer   = 11/27/2026,1.0.17.0
 PnpLockdown = 1
 
 [Manufacturer]

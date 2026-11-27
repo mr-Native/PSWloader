@@ -282,28 +282,40 @@ Step 'pswloader check' {
   $need = if ($vj -and $vj.minFirmware) { & $rev ([string]$vj.minFirmware) } else { $null }; $have = & $rev $bios
   if ($bios -notlike 'PSWloader*') { Chk 2 'Firmware' "Windows was not started by PSWloader (BIOS: $bios)." }
   elseif ($need -and (-not $have -or $have -lt $need)) { Chk 2 'Firmware' "PSWloader.elf is outdated ($bios). Replace it in the Payload Manager with the one from the $($vj.version) release." }
-  elseif ($have -and $have -lt (& $rev 'r5.28.14')) {
-    if ($script:RestartPending) { Chk 1 'Firmware' "$bios still runs - the update put r5.28.14 on the EFI partition, it starts after the restart." }
-    else { Chk 1 'Firmware' "$bios - older than in PSWloader v1.2 (r5.28.14). Run the updater, and replace PSWloader.elf if it stays old after a restart." } }
+  elseif ($have -and $have -lt (& $rev 'r5.28.15')) {
+    if ($script:RestartPending) { Chk 1 'Firmware' "$bios still runs - the update put r5.28.15 on the EFI partition, it starts after the restart." }
+    else { Chk 1 'Firmware' "$bios - older than in PSWloader v1.2.1 (r5.28.15). Run the updater, and replace PSWloader.elf if it stays old after a restart." } }
+  elseif ($have -and $have -gt (& $rev 'r5.28.15')) {
+    Chk 0 'Firmware' "$bios (testing - newer than v1.2.1 r5.28.15)" }
   else { Chk 0 'Firmware' "$bios" }
   $ts = ((bcdedit /enum '{current}' 2>$null | Select-String -Pattern 'testsigning') -join ' ')
   if ($ts -match 'Yes') { Chk 0 'Test signing' 'On (needed for the PS5 drivers).' } else { Chk 2 'Test signing' 'Off - the PS5 drivers cannot load. Troubleshooting turns it on (restart needed).' 'testsigning' }
-  # PS5 drivers by service; the versions of this release (PSWloader v1.2) - an older one is a note (run the updater)
-  $expect = @{ bc250kmd = '0.7.216.1230'; ps5pwr = '1.19.2.0'; ps5gbe = '1.0.10.1'; ps5wifi = '1.0.7.0'; ps5btx = '0.7.0.0' }
+  # PS5 drivers by service; expected versions for PSWloader v1.2.1 (older = note, newer = recognized as testing)
+  $relVer = 'v1.2.1'
+  $expect = @{ bc250kmd = '0.7.216.1231'; ps5pwr = '1.20.0.0'; ps5gbe = '1.0.10.1'; ps5wifi = '1.0.17.0'; mtkwl6ex = '3.6.0.1434'; mtkwecx = '26.40.3.69'; ps5btx = '0.8.0.0' }
   foreach ($d in @(@('bc250kmd', 'Graphics driver'), @('ps5pwr', 'Power and fan driver'), @('ps5gbe', 'Ethernet driver'), @('ps5wifi', 'Wi-Fi driver'), @('ps5btx', 'Bluetooth driver'))) {
-    $e = @(Get-CimInstance Win32_PnPEntity -Filter "Service='$($d[0])'" -ErrorAction SilentlyContinue)
+    $svc = $d[0]
+    $e = @(Get-CimInstance Win32_PnPEntity -Filter "Service='$svc'" -ErrorAction SilentlyContinue)
+    if (-not $e.Count -and $svc -eq 'ps5wifi') {
+      foreach ($alt in 'mtkwl6ex', 'mtkwecx') {
+        $ae = @(Get-CimInstance Win32_PnPEntity -Filter "Service='$alt'" -ErrorAction SilentlyContinue)
+        if ($ae.Count) { $svc = $alt; $e = $ae; break }
+      }
+    }
     if (-not $e.Count) { Chk 2 $d[1] 'Not installed or the device is not found.' "driver:$($d[0])"; continue }
     $err = @($e | Where-Object { $_.ConfigManagerErrorCode -ne 0 })
     $ver = (Get-PnpDeviceProperty -InstanceId $e[0].PNPDeviceID -KeyName DEVPKEY_Device_DriverVersion -ErrorAction SilentlyContinue).Data
-    if ($d[0] -eq 'ps5pwr') {   # v1.9: an update points the service at the new package (no device reinstall) - its INF tells the version
+    if ($svc -eq 'ps5pwr') {   # v1.9: an update points the service at the new package (no device reinstall) - its INF tells the version
       $ip = [string](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\ps5pwr' -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
       $pinf = Join-Path (Split-Path -Parent ($ip -replace '^\\SystemRoot', $env:SystemRoot)) 'ps5pwr.inf'
       $m = if (Test-Path -LiteralPath $pinf) { Select-String -LiteralPath $pinf -Pattern '^\s*DriverVer\s*=\s*[^,]+,\s*([0-9.]+)' | Select-Object -First 1 } else { $null }
       if ($m) { $ver = $m.Matches[0].Groups[1].Value } }
-    if ($err.Count) { Chk 2 $d[1] "The device reports a problem (code $($err[0].ConfigManagerErrorCode)). Troubleshooting repairs the driver and restarts the device." "device:$($d[0])" }
-    elseif ($ver -and $expect[$d[0]] -and ([version]$ver -lt [version]$expect[$d[0]])) {
-      if ($script:RestartPending) { Chk 1 $d[1] "Version $ver still loaded - $($expect[$d[0]]) is installed and loads after the restart." }
-      else { Chk 1 $d[1] "Running, version $ver - older than in PSWloader v1.2 ($($expect[$d[0]])). Run the updater." } }
+    if ($err.Count) { Chk 2 $d[1] "The device reports a problem (code $($err[0].ConfigManagerErrorCode)). Troubleshooting repairs the driver and restarts the device." "device:$svc" }
+    elseif ($ver -and $expect[$svc] -and ([version]$ver -lt [version]$expect[$svc])) {
+      if ($script:RestartPending) { Chk 1 $d[1] "Version $ver still loaded - $($expect[$svc]) is installed and loads after the restart." }
+      else { Chk 1 $d[1] "Running, version $ver - older than expected for PSWloader $relVer ($($expect[$svc])). Run the updater." } }
+    elseif ($ver -and $expect[$svc] -and ([version]$ver -gt [version]$expect[$svc])) {
+      Chk 0 $d[1] "Running, version $ver (testing - newer than $relVer expected $($expect[$svc]))." }
     else { Chk 0 $d[1] "Running$(if ($ver) { ", version $ver" })." }
   }
   # v1.8 (user 26.11.2026: problems inside a driver that looks installed): a GPU driver that is installed but not used,
@@ -353,6 +365,7 @@ Step 'pswloader check' {
     elseif ($tk.State -eq 'Disabled') { Chk 2 $bt[1] "The task $($bt[0]) is turned off. Troubleshooting turns it on and starts it." "task:$($bt[0])" }
     elseif ($bt[2] -and $signedInMin -lt 5) { Chk 0 $bt[1] 'Starts two minutes after the sign-in.' }
     elseif ($res -eq 0) { Chk 0 $bt[1] 'Not running - it ended without an error.' }
+    elseif ($res -eq 0x41303 -and $script:RestartPending) { Chk 1 $bt[1] 'Starts after the restart.' }
     else { Chk 2 $bt[1] ("Not running - the task $($bt[0]) stopped with error 0x{0:X}" -f $res + $(if ($ti.LastRunTime) { " (started $($ti.LastRunTime.ToString('yyyy-MM-dd HH:mm')))" }) + '. Troubleshooting starts it again.') "task:$($bt[0])" }
   }
   # services of PSWloader that should run, and services Windows saw stopping unexpectedly in the last 24 hours

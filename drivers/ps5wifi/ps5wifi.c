@@ -1,4 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0-only
+ * ps5wifi v1.0.10 (27.11.2026): Full Wi-Fi 6 (802.11ax 80 MHz 2x2, 1.2 Gbps PHY) + 802.11ac VHT + 5 GHz preference,
+ *       WMM/QoS IE (type 221) + ADDBA BlockAck accept (A-MPDU without A-MSDU), 128-slot TX/RX ADMA rings,
+ *       batched RX NBL indication & MMIO doorbell, and adaptive high-resolution timer (EX_TIMER_HIGH_RESOLUTION:
+ *       0.25 ms active / 4 ms idle) -> HW: 17.8 Mbit/s -> 354.5 Mbit/s (200 Mbit/s single-stream, 1 ms ping).
+ * ps5wifi v1.0.9 (27.11.2026): real signal bars - the UI reported a stale scan-time RSSI, so a 300 Mbit/s HT link
+ *       looked like 1 bar; now the live firmware RSSI (CMD_RSSI_INFO, bcn_rssi_last) is written onto the connected BSS
+ *       right after connect and on each scan (iw620_update_connected_rssi).
+ * ps5wifi v1.0.8 (27.11.2026): Wi-Fi 6 - HT Capabilities IE (type 45) in the association, built from GET_HW_SPEC
+ *       dot_11n_dev_cap + dev_mcs_support (mlan_11n.c), so the IW620 associates at 802.11n (HW: 24 -> 300 Mbit/s).
+ *       Also recover a wedged firmware command engine - when GET_HW_SPEC times out (health "step5 /
+ *       0x2003", Wi-Fi comes up with no SSIDs after long uptime), re-arm the ADMA command rings and re-issue CMD_FUNC_INIT,
+ *       then retry GET_HW_SPEC with longer timeouts (iw620_hw_init). Runs only after init already failed, so it can never
+ *       make a working adapter worse; a truly hung firmware still needs a cold boot (PSWloader re-extracts it from GameOS).
  * ps5wifi v1.0.7 (25.11.2026): no FUNC_SHUTDOWN at halt/restart (the IW620 core stayed down until power-off: Wi-Fi dead after
  *       a driver or Windows restart) - bus mastering off instead, the next start reuses the running firmware; the scan inside OID_DOT11_SCAN_REQUEST stops after a failed command and after 4 s - while
  *       disconnected Windows scans every minute and NDIS reset the adapter each time ("did not respond to an OID request").
@@ -20,12 +33,12 @@
 #include "iw620_hw.h"
 
 #define PS5WIFI_TAG         'ifw5'
-#define PS5WIFI_VERSION     0x00010007u   /* v1.0.7 */
+#define PS5WIFI_VERSION     0x0001000Au   /* v1.0.10 */
 
-#define TX_RING_SIZE        32u
-#define TX_RING_BITS        5u
-#define RX_RING_SIZE        32u
-#define RX_RING_BITS        5u
+#define TX_RING_SIZE        128u
+#define TX_RING_BITS        7u
+#define RX_RING_SIZE        128u
+#define RX_RING_BITS        7u
 #define EVT_RING_SIZE       8u
 #define EVT_RING_BITS       3u
 
@@ -33,7 +46,7 @@
 #define RX_BUF_STRIDE       2048u
 #define EVT_BUF_STRIDE      1024u
 #define CMD_BUF_SIZE        4096u   /* v1.0.6: was 2048 - scan responses up to 2312+ bytes */
-#define POLL_MS             2u
+#define POLL_MS             1u
 
 #define MAX_BSS_ENTRIES     64u
 #define MAX_BSS_IE_BYTES    1024u
@@ -66,7 +79,7 @@ typedef struct _WIFI_ADAPTER {
     NDIS_HANDLE handle;
     NDIS_HANDLE dma;
     NDIS_HANDLE nbl_pool;
-    NDIS_HANDLE timer;
+    PEX_TIMER hr_timer;
     NDIS_SPIN_LOCK lock;
 
     volatile UCHAR *bar0;
@@ -99,6 +112,25 @@ typedef struct _WIFI_ADAPTER {
     /* 802.11 state */
     UCHAR perm_mac[6];
     UCHAR cur_mac[6];
+    ULONG dot_11n_dev_cap;   /* v1.0.8: 11n device capability from GET_HW_SPEC (builds the HT Capabilities IE) */
+    UCHAR dev_mcs_support;   /* v1.0.8: MCS support bytes from GET_HW_SPEC */
+    ULONG dot_11ac_dev_cap;  /* v1.0.9.7: 11ac VHT device capability from GET_HW_SPEC */
+    ULONG dot_11ac_mcs_support; /* v1.0.9.7: 11ac VHT MCS map from GET_HW_SPEC */
+    UCHAR hw_he_cap_5g[64];  /* v1.0.9.7: raw 5 GHz HE Capabilities TLV from GET_HW_SPEC */
+    USHORT hw_he_cap_5g_len;
+    UCHAR hw_he_cap_2g[64];  /* v1.0.9.7: raw 2.4 GHz HE Capabilities TLV from GET_HW_SPEC */
+    USHORT hw_he_cap_2g_len;
+    ULONG addba_count;       /* v1.0.9.7: received EVENT_ADDBA count */
+    ULONG addba_ok;          /* v1.0.9.7: accepted CMD_11N_ADDBA_RSP count */
+    ULONG rx_amsdu_drop;     /* v1.0.9.7: dropped oversized/A-MSDU RX frames */
+    ULONG64 link_speed_bps;  /* v1.0.9.7: negotiated PHY class link speed */
+    LONG  conn_rssi;         /* v1.0.9: live link RSSI (CMD_RSSI_INFO) for the connected signal bars; -50 until known */
+    volatile LONG cmd_busy;  /* v1.0.9.2: serialises iw620_exec_cmd across the OID path and the poll timer */
+    ULONG poll_count;        /* v1.0.9.2: poll tick counter */
+    ULONGLONG rate_sample_t; /* v1.0.9.2: last TX-rate diagnostic sample time (100 ns units) */
+    volatile ULONGLONG rx_active_until; /* v1.0.9.9: keep high-res timer in 0.25 ms mode until this time (100 ns units) */
+    UCHAR last_rx_rate;      /* v1.0.9.5: downlink rate index from the last RxPD (AP->console) */
+    UCHAR last_rx_rate_info; /* v1.0.9.5: downlink rate_info (bit0-1 format, bit2-3 BW, bit4 SGI) */
     UCHAR assoc_bssid[6];
     UCHAR desired_ssid[32];
     ULONG desired_ssid_len;
@@ -496,6 +528,10 @@ static BOOLEAN iw620_exec_cmd(PWIFI_ADAPTER a, USHORT cmd_id, const void *body, 
     USHORT total_len = (USHORT)(sizeof(PCIE_IF_HDR) + cmd_size);
     if (total_len > CMD_BUF_SIZE) return FALSE;
 
+    /* v1.0.9.2: only one command (OID path or poll-timer diagnostic) may own the shared cmd/rsp
+       buffers + ADMA ch2 at a time. A loser just skips its call; never blocks (no bugcheck risk). */
+    if (InterlockedCompareExchange(&a->cmd_busy, 1, 0) != 0) { a->last_err = 0x4000u | cmd_id; return FALSE; }
+
     RtlZeroMemory(a->cmd_buf, total_len);
     RtlZeroMemory(a->cmdrsp_buf, CMD_BUF_SIZE);
 
@@ -535,12 +571,14 @@ static BOOLEAN iw620_exec_cmd(PWIFI_ADAPTER a, USHORT cmd_id, const void *body, 
     }
     if (!got) {
         a->last_err = 0x2000u | cmd_id;
+        InterlockedExchange(&a->cmd_busy, 0);
         return FALSE;
     }
 
     HOST_CMD_HDR *rhdr = (HOST_CMD_HDR *)(a->cmdrsp_buf + sizeof(PCIE_IF_HDR));
     if ((rhdr->command & 0x7FFFu) != cmd_id || rhdr->result != 0) {
         a->last_err = 0x3000u | (rhdr->result & 0xFFu);
+        InterlockedExchange(&a->cmd_busy, 0);
         return FALSE;
     }
 
@@ -550,6 +588,7 @@ static BOOLEAN iw620_exec_cmd(PWIFI_ADAPTER a, USHORT cmd_id, const void *body, 
         if (copy) RtlCopyMemory(rsp_body, a->cmdrsp_buf + sizeof(PCIE_IF_HDR) + sizeof(HOST_CMD_HDR), copy);
         *rsp_body_len = copy;
     }
+    InterlockedExchange(&a->cmd_busy, 0);
     return TRUE;
 }
 
@@ -583,14 +622,15 @@ static BOOLEAN iw620_hw_init(PWIFI_ADAPTER a) {
     w32(a, ADMA_CHAN1_Q0 + ADMA_DST_RW_PTR, a->rx_wr);
     w32(a, ADMA_CHAN1_Q1 + ADMA_DST_RW_PTR, a->evt_wr);
 
-    /* 2. CMD_GET_HW_SPEC -> real MAC address (retry up to 3x for clean hot-reload) */
+    /* 2. CMD_GET_HW_SPEC -> real MAC address + 11n/11ac/11ax capabilities (retry up to 3x for clean hot-reload) */
+    UCHAR spec_buf[1024];
     CMD_GET_HW_SPEC_BODY spec;
-    USHORT spec_len = sizeof(spec);
+    USHORT spec_len = sizeof(spec_buf);
     BOOLEAN got_spec = FALSE;
     for (int tries = 0; tries < 3; tries++) {
-        spec_len = sizeof(spec);
-        RtlZeroMemory(&spec, sizeof(spec));
-        if (iw620_exec_cmd(a, CMD_GET_HW_SPEC, &spec, sizeof(spec), &spec, &spec_len, 1000)) {
+        spec_len = sizeof(spec_buf);
+        RtlZeroMemory(spec_buf, sizeof(spec_buf));
+        if (iw620_exec_cmd(a, CMD_GET_HW_SPEC, spec_buf, sizeof(CMD_GET_HW_SPEC_BODY), spec_buf, &spec_len, 1000)) {
             got_spec = TRUE;
             break;
         }
@@ -598,12 +638,73 @@ static BOOLEAN iw620_hw_init(PWIFI_ADAPTER a) {
         delay_us(20000);
     }
     if (!got_spec) {
+        /* v1.0.8: the reused firmware's command engine is wedged - GET_HW_SPEC timed out (health "step5 / 0x2003").
+           The IW620 cannot be reset from the driver (no FLR; CMD_FUNC_SHUTDOWN leaves the core down), so re-arm the
+           command rings and re-issue CMD_FUNC_INIT once, then try GET_HW_SPEC again with longer timeouts. This resyncs
+           a desynced ADMA command ring without a chip reset. It runs ONLY after the adapter already failed, so it can
+           never make a working adapter worse; worst case it stays failed exactly as before. A full recovery of a truly
+           hung firmware still needs a cold boot (PSWloader re-extracts the firmware from GameOS). */
         diag_write_dword(L"Stage", 5);
         diag_write_dword(L"LastErr", a->last_err);
-        return FALSE;
+        iw620_setup_rings(a);
+        (void)iw620_exec_cmd(a, CMD_FUNC_INIT, NULL, 0, NULL, NULL, 1000);
+        {
+            ULONG hw_tx_rd = (r32(a, ADMA_CHAN0_Q0 + ADMA_SRC_RW_PTR) >> 16) & 0x1FFFu;
+            a->tx_wr = hw_tx_rd; a->tx_rd = hw_tx_rd; w32(a, ADMA_CHAN0_Q0 + ADMA_SRC_RW_PTR, a->tx_wr);
+        }
+        w32(a, ADMA_CHAN1_Q0 + ADMA_DST_RW_PTR, a->rx_wr);
+        w32(a, ADMA_CHAN1_Q1 + ADMA_DST_RW_PTR, a->evt_wr);
+        for (int tries = 0; tries < 4 && !got_spec; tries++) {
+            spec_len = sizeof(spec_buf); RtlZeroMemory(spec_buf, sizeof(spec_buf));
+            if (iw620_exec_cmd(a, CMD_GET_HW_SPEC, spec_buf, sizeof(CMD_GET_HW_SPEC_BODY), spec_buf, &spec_len, 1500)) { got_spec = TRUE; break; }
+            w32(a, REG_HOST_INT_STATUS, 0); delay_us(50000);
+        }
+        if (!got_spec) {
+            diag_write_dword(L"Stage", 5);
+            diag_write_dword(L"LastErr", a->last_err);
+            diag_write_dword(L"HwSpecRecovery", 0);   /* recovery tried, firmware still wedged -> cold boot needed */
+            return FALSE;
+        }
+        diag_write_dword(L"HwSpecRecovery", 1);        /* recovered a wedged command engine without a reboot */
     }
+    RtlZeroMemory(&spec, sizeof(spec));
+    RtlCopyMemory(&spec, spec_buf, (spec_len < sizeof(spec)) ? spec_len : sizeof(spec));
     RtlCopyMemory(a->perm_mac, spec.permanent_addr, 6);
     RtlCopyMemory(a->cur_mac, spec.permanent_addr, 6);
+    a->dot_11n_dev_cap = spec.dot_11n_dev_cap;         /* v1.0.8: for the HT Capabilities IE (11n rates) */
+    a->dev_mcs_support = spec.dev_mcs_support;
+    a->dot_11ac_dev_cap = spec.dot_11ac_dev_cap;       /* v1.0.9.7: for VHT Capabilities IE (11ac 80 MHz) */
+    a->dot_11ac_mcs_support = spec.dot_11ac_mcs_support;
+    a->hw_he_cap_5g_len = 0;
+    a->hw_he_cap_2g_len = 0;
+    if (spec_len > sizeof(CMD_GET_HW_SPEC_BODY)) {
+        USHORT off = sizeof(CMD_GET_HW_SPEC_BODY);
+        while (off + sizeof(TLV_HDR) <= spec_len) {
+            const TLV_HDR *th = (const TLV_HDR *)(spec_buf + off);
+            USHORT total = (USHORT)(sizeof(TLV_HDR) + th->len);
+            if (th->len == 0 || off + total > spec_len) break;
+            if (th->type == TLV_TYPE_EXTENSION_ID && th->len >= 10 && total <= sizeof(a->hw_he_cap_5g)) {
+                const UCHAR *eb = spec_buf + off + sizeof(TLV_HDR);
+                if (eb[0] == EXT_ID_HE_CAP) {
+                    /* eb[0]=ext_id, eb[1..6]=he_mac_cap[6], eb[7]=he_phy_cap[0] (bits 0..1 = 2.4G support) */
+                    if (eb[7] & 0x03u) {
+                        RtlCopyMemory(a->hw_he_cap_2g, spec_buf + off, total);
+                        a->hw_he_cap_2g_len = total;
+                    } else {
+                        RtlCopyMemory(a->hw_he_cap_5g, spec_buf + off, total);
+                        a->hw_he_cap_5g_len = total;
+                    }
+                }
+            }
+            off += total;
+        }
+    }
+    diag_write_dword(L"Dot11nCap", spec.dot_11n_dev_cap);
+    diag_write_dword(L"McsSupport", spec.dev_mcs_support);
+    diag_write_dword(L"Dot11acCap", a->dot_11ac_dev_cap);
+    diag_write_dword(L"Dot11acMcs", a->dot_11ac_mcs_support);
+    diag_write_dword(L"HeCap5gLen", a->hw_he_cap_5g_len);
+    diag_write_dword(L"HeCap2gLen", a->hw_he_cap_2g_len);
     diag_write_dword(L"MacLo", (ULONG)a->perm_mac[2] | ((ULONG)a->perm_mac[3] << 8) |
                                ((ULONG)a->perm_mac[4] << 16) | ((ULONG)a->perm_mac[5] << 24));
     diag_write_dword(L"MacHi", (ULONG)a->perm_mac[0] | ((ULONG)a->perm_mac[1] << 8));
@@ -681,6 +782,82 @@ static VOID parse_scan_bss_list(PWIFI_ADAPTER a, const UCHAR *rsp, USHORT rsp_le
         b->phy_id = (b->channel > 14) ? 1 : 0;
         b->valid = TRUE;
     }
+}
+
+/* v1.0.9: ask the firmware for the live link RSSI (CMD_RSSI_INFO) and write it onto the connected BSS entry,
+   so Windows shows the real signal bars. Before this the UI reported a stale scan-time value - a 300 Mbit/s
+   HT link (strong signal) looked like 1 bar. Response body (mlan HostCmd_DS_802_11_RSSI_INFO_RSP): bcn_rssi_last
+   (s16 dBm) at offset 14 (action, ndata, nbcn, data_rssi_last, data_nf_last, data_rssi_avg, data_nf_avg). */
+static VOID iw620_update_connected_rssi(PWIFI_ADAPTER a) {
+    if (!a->connected) return;
+    UCHAR body[6];
+    RtlZeroMemory(body, sizeof(body));          /* action = GET (0), ndata = 0, nbcn = 0 */
+    UCHAR rsp[64];
+    USHORT rlen = sizeof(rsp);
+    if (!iw620_exec_cmd(a, CMD_RSSI_INFO, body, sizeof(body), rsp, &rlen, 1000)) return;
+    if (rlen < 16) return;
+    SHORT bcn_rssi_last = *(const SHORT *)(rsp + 14);
+    if (bcn_rssi_last >= 0 || bcn_rssi_last < -120) return;   /* sanity: a real RSSI is a small negative dBm */
+    a->conn_rssi = bcn_rssi_last;                             /* feeds the per-frame recv context -> connected bars */
+    for (ULONG i = 0; i < a->bss_count; i++) {
+        if (a->bss[i].valid && RtlEqualMemory(a->bss[i].bssid, a->assoc_bssid, 6)) {
+            a->bss[i].rssi = bcn_rssi_last;
+            break;
+        }
+    }
+    diag_write_dword(L"ConnRssi", (ULONG)(LONG)bcn_rssi_last);
+}
+
+/* v1.0.9.2 DIAGNOSTIC (read-only): ask the firmware for the current PHY TX rate so we can tell
+   whether the link is actually running 802.11n (HT) or has fallen back to legacy a/g.
+   CMD_TX_RATE_QUERY (0x007F) response body: [0]=tx_rate index, [1]=tx_rate_info
+   (bit0-1 format: 0=legacy,1=HT,2=VHT,3=HE; bit2-3 BW: 0=20,1=40,2=80; bit4 SGI), [2]=ext. */
+static VOID iw620_update_tx_rate(PWIFI_ADAPTER a) {
+    if (!a->connected) return;
+    UCHAR body[4];
+    RtlZeroMemory(body, sizeof(body));
+    UCHAR rsp[16];
+    USHORT rlen = sizeof(rsp);
+    if (!iw620_exec_cmd(a, CMD_TX_RATE_QUERY, body, sizeof(body), rsp, &rlen, 300)) return;
+    if (rlen < 2) return;
+    diag_write_dword(L"TxRate", (ULONG)rsp[0]);
+    diag_write_dword(L"TxRateInfo", (ULONG)rsp[1]);
+    diag_write_dword(L"RxRate", (ULONG)a->last_rx_rate);          /* v1.0.9.5: downlink (AP->console) rate */
+    diag_write_dword(L"RxRateInfo", (ULONG)a->last_rx_rate_info);
+    diag_write_dword(L"AddbaCount", a->addba_count);
+    diag_write_dword(L"AddbaOk", a->addba_ok);
+    diag_write_dword(L"RxAmsduDrop", a->rx_amsdu_drop);
+}
+
+/* v1.0.9.7: enable full auto rate adaptation across Legacy + HT (MCS0-15) + VHT (2x2 MCS0-9) +
+   HE (2x2 MCS0-11 when FW supports 11ax) via CMD_TX_RATE_CFG (0x00D6). */
+static VOID iw620_set_auto_rate(PWIFI_ADAPTER a) {
+    if (!a->connected) return;
+    BOOLEAN has_he = (a->hw_he_cap_5g_len > 0 || a->hw_he_cap_2g_len > 0);
+    UCHAR body[68];
+    RtlZeroMemory(body, sizeof(body));
+    USHORT *w = (USHORT *)body;
+    USHORT pos = 0;
+    w[pos++] = 1;        /* action = HostCmd_ACT_GEN_SET */
+    w[pos++] = 0;        /* cfg_index */
+    w[pos++] = 0x0153;   /* RateScope TLV type */
+    w[pos++] = has_he ? 52 : 36; /* hr_dsss(2)+ofdm(2)+ht[8](16)+vht[8](16)[+he[8](16)] */
+    w[pos++] = 0x000F;   /* hr_dsss_rate_bitmap: 1/2/5.5/11 Mbit/s */
+    w[pos++] = 0x00FF;   /* ofdm_rate_bitmap: all legacy OFDM rates */
+    w[pos++] = 0xFFFF;   /* ht_mcs_rate_bitmap[0]: MCS0-15 (2 spatial streams) */
+    pos += 7;            /* ht_mcs[1..7] = 0 */
+    w[pos++] = 0x03FF;   /* vht_mcs_rate_bitmap[0]: NSS1 MCS0-9 */
+    w[pos++] = 0x03FF;   /* vht_mcs_rate_bitmap[1]: NSS2 MCS0-9 */
+    pos += 6;            /* vht_mcs[2..7] = 0 */
+    if (has_he) {
+        w[pos++] = 0x0FFF; /* he_mcs_rate_bitmap[0]: NSS1 MCS0-11 */
+        w[pos++] = 0x0FFF; /* he_mcs_rate_bitmap[1]: NSS2 MCS0-11 */
+        pos += 6;          /* he_mcs[2..7] = 0 */
+    }
+    w[pos++] = 0x0151;   /* RateDropPattern TLV type */
+    w[pos++] = 4;        /* RateDropPattern length: rate_drop_mode(4) */
+    pos += 2;            /* rate_drop_mode = 0 */
+    (VOID)iw620_exec_cmd(a, CMD_TX_RATE_CFG, body, (USHORT)(pos * 2), NULL, NULL, 500);
 }
 
 static VOID iw620_do_scan(PWIFI_ADAPTER a) {
@@ -766,8 +943,9 @@ static VOID indicate_link_state(PWIFI_ADAPTER a, BOOLEAN up) {
     ls.Header.Size = NDIS_SIZEOF_LINK_STATE_REVISION_1;
     ls.MediaConnectState = up ? MediaConnectStateConnected : MediaConnectStateDisconnected;
     ls.MediaDuplexState = MediaDuplexStateHalf;
-    ls.XmitLinkSpeed = up ? 300000000ULL : NDIS_LINK_SPEED_UNKNOWN;
-    ls.RcvLinkSpeed  = up ? 300000000ULL : NDIS_LINK_SPEED_UNKNOWN;
+    ULONG64 spd = a->link_speed_bps ? a->link_speed_bps : 300000000ULL;
+    ls.XmitLinkSpeed = up ? spd : NDIS_LINK_SPEED_UNKNOWN;
+    ls.RcvLinkSpeed  = up ? spd : NDIS_LINK_SPEED_UNKNOWN;
 
     RtlZeroMemory(&ind, sizeof(ind));
     ind.Header.Type = NDIS_OBJECT_TYPE_STATUS_INDICATION;
@@ -828,15 +1006,42 @@ static ULONG whole_ies_len(const UCHAR *ie, ULONG len) {
     return pos;
 }
 
+static BOOLEAN bss_has_ie(const BSS_ENTRY *b, UCHAR target_id) {
+    const UCHAR *ie = b->ie, *end = b->ie + b->ie_len;
+    while (ie + 2 <= end) {
+        UCHAR id = ie[0], len = ie[1];
+        if (ie + 2 + len > end) break;
+        if (id == target_id) return TRUE;
+        ie += 2 + len;
+    }
+    return FALSE;
+}
+
+static BOOLEAN bss_has_ext_ie(const BSS_ENTRY *b, UCHAR ext_id) {
+    const UCHAR *ie = b->ie, *end = b->ie + b->ie_len;
+    while (ie + 2 <= end) {
+        UCHAR id = ie[0], len = ie[1];
+        if (ie + 2 + len > end) break;
+        if (id == 255 && len >= 1 && ie[2] == ext_id) return TRUE;
+        ie += 2 + len;
+    }
+    return FALSE;
+}
+
 static VOID iw620_do_connect(PWIFI_ADAPTER a) {
-    /* Locate matching BSS from scan cache */
+    /* Locate matching BSS from scan cache; prefer 5 GHz (channel > 14) whenever signal is usable (>= -75 dBm) */
     BSS_ENTRY *target = NULL;
+    BSS_ENTRY *best5 = NULL;
     for (ULONG i = 0; i < a->bss_count; i++) {
         if (a->bss[i].valid && a->bss[i].ssid_len == a->desired_ssid_len &&
             RtlEqualMemory(a->bss[i].ssid, a->desired_ssid, a->desired_ssid_len)) {
             if (!target || a->bss[i].rssi > target->rssi) target = &a->bss[i];
+            if (a->bss[i].channel > 14 && a->bss[i].rssi >= -75) {
+                if (!best5 || a->bss[i].rssi > best5->rssi) best5 = &a->bss[i];
+            }
         }
     }
+    if (best5) target = best5;
 
     /* 1. CONNECTION_START */
     {
@@ -885,7 +1090,7 @@ static VOID iw620_do_connect(PWIFI_ADAPTER a) {
         }
 
         /* Build CMD_802_11_ASSOCIATE */
-        UCHAR req[512];
+        UCHAR req[768];
         RtlZeroMemory(req, sizeof(req));
         CMD_ASSOC_REQ_HDR *ah = (CMD_ASSOC_REQ_HDR *)req;
         RtlCopyMemory(ah->peer_sta_addr, target->bssid, 6);
@@ -954,6 +1159,85 @@ static VOID iw620_do_connect(PWIFI_ADAPTER a) {
             pos += (USHORT)(rsn_len - 2);
         }
 
+        /* v1.0.8: HT Capabilities TLV (type 45) so the IW620 associates at 802.11n rates instead of only
+           802.11a/g (~24 Mbit/s before). Built from the device's 11n capability reported by GET_HW_SPEC,
+           following mlan_11n.c wlan_fill_ht_cap_tlv. The firmware does the 11n PHY/aggregation; a legacy AP
+           ignores the IE. Body = HTCap_t (26 B): ht_cap_info[2] ampdu_param[1] supported_mcs_set[16]
+           ht_ext_cap[2] tx_bf_cap[4] asel[1]. */
+        if (a->dot_11n_dev_cap && (USHORT)(pos + sizeof(TLV_HDR) + 26) <= sizeof(req)) {
+            t = (TLV_HDR *)(req + pos);
+            t->type = 45; t->len = 26;
+            pos += sizeof(TLV_HDR);
+            UCHAR *ht = req + pos;
+            RtlZeroMemory(ht, 26);
+            USHORT info = 0;
+            if (a->dot_11n_dev_cap & (1u << 17)) info |= (1u << 1);   /* 40 MHz (SUPPCHANWIDTH) */
+            info |= (1u << 5);                                        /* Short GI 20 MHz */
+            if (a->dot_11n_dev_cap & (1u << 17)) info |= (1u << 6);   /* Short GI 40 MHz */
+            ht[0] = (UCHAR)(info & 0xFF); ht[1] = (UCHAR)(info >> 8);
+            ht[2] = 0x03;                                             /* A-MPDU: 64K factor, no spacing */
+            int rxmcs = a->dev_mcs_support & 0x0F;                    /* GET_RXMCSSUPP: number of MCS bytes */
+            if (rxmcs < 1) rxmcs = 1;
+            if (rxmcs > 16) rxmcs = 16;
+            for (int i = 0; i < rxmcs; i++) ht[3 + i] = 0xFF;         /* supported_mcs_set */
+            pos += 26;
+            diag_write_dword(L"HtTlvRxMcs", (ULONG)rxmcs);
+        }
+
+        ULONG assoc_mode = 1; /* 1=HT, 2=VHT, 3=HE */
+        /* v1.0.9.7: VHT Capabilities (type 191, 12 B) + Operating Mode Notification (type 199, 1 B)
+           for 802.11ac 80 MHz 2x2 (up to 867 Mbps PHY) on 5 GHz when the AP advertises VHT. */
+        if (target->channel > 14 && a->dot_11ac_dev_cap && bss_has_ie(target, 191) &&
+            (USHORT)(pos + sizeof(TLV_HDR) + 12 + sizeof(TLV_HDR) + 1) <= sizeof(req)) {
+            t = (TLV_HDR *)(req + pos);
+            t->type = TLV_TYPE_VHT_CAP; t->len = 12;
+            pos += sizeof(TLV_HDR);
+            ULONG vcap = a->dot_11ac_dev_cap & ~((1u << 2) | (1u << 3)); /* max 80 MHz (clear 160/80+80 bits) */
+            *(ULONG *)(req + pos)      = vcap;
+            *(USHORT *)(req + pos + 4) = (USHORT)(a->dot_11ac_mcs_support & 0xFFFFu);         /* rx_mcs_map */
+            *(USHORT *)(req + pos + 6) = 0;                                                   /* rx_max_rate */
+            *(USHORT *)(req + pos + 8) = (USHORT)((a->dot_11ac_mcs_support >> 16) & 0xFFFFu); /* tx_mcs_map */
+            *(USHORT *)(req + pos + 10) = 0;                                                  /* tx_max_rate */
+            pos += 12;
+
+            t = (TLV_HDR *)(req + pos);
+            t->type = TLV_TYPE_OPER_MODE_NTF; t->len = 1;
+            pos += sizeof(TLV_HDR);
+            req[pos++] = 0x12u; /* 80 MHz (2) + 2 NSS ((2-1)<<4 = 0x10) */
+            assoc_mode = 2;
+        }
+
+        /* v1.0.9.7: HE Capabilities TLV (type 255, ext_id 35) copied from GET_HW_SPEC for
+           802.11ax Wi-Fi 6 80 MHz 2x2 (up to 1201 Mbps PHY) when both HW and AP support HE. */
+        {
+            const UCHAR *he_tlv = (target->channel > 14) ? a->hw_he_cap_5g : a->hw_he_cap_2g;
+            USHORT he_len = (target->channel > 14) ? a->hw_he_cap_5g_len : a->hw_he_cap_2g_len;
+            if (he_len >= sizeof(TLV_HDR) + 10 && bss_has_ext_ie(target, EXT_ID_HE_CAP) &&
+                (USHORT)(pos + he_len) <= sizeof(req)) {
+                RtlCopyMemory(req + pos, he_tlv, he_len);
+                /* Clear 160 / 80+80 MHz bits in he_phy_cap[0] (offset: TLV_HDR(4) + ext_id(1) + mac_cap(6) = 11) */
+                if (he_len > 11) req[pos + 11] &= (UCHAR)~((1u << 3) | (1u << 4));
+                pos += he_len;
+                assoc_mode = 3;
+            }
+        }
+        diag_write_dword(L"AssocChannel", target->channel);
+        diag_write_dword(L"AssocMode", assoc_mode);
+        a->link_speed_bps = (assoc_mode == 3) ? 1201000000ULL :
+                            (assoc_mode == 2) ?  866700000ULL : 300000000ULL;
+
+        /* v1.0.9.8: WMM Information Element (type 221, 7 B: OUI 00:50:F2, type 2, subtype 0, ver 1, QoS 0).
+           Required by IEEE 802.11n/ac/ax so the AP treats us as a QoS station and enables BlockAck /
+           A-MPDU aggregation (without WMM IE, AddbaCount stayed 0 and downlink was capped at ~25 Mbit/s). */
+        if ((USHORT)(pos + sizeof(TLV_HDR) + 7) <= sizeof(req)) {
+            static const UCHAR wmm_ie[7] = { 0x00, 0x50, 0xF2, 0x02, 0x00, 0x01, 0x00 };
+            t = (TLV_HDR *)(req + pos);
+            t->type = 221u; t->len = 7;
+            pos += sizeof(TLV_HDR);
+            RtlCopyMemory(req + pos, wmm_ie, 7);
+            pos += 7;
+        }
+
         /* Clear any stale firmware STA/TX-queue state before associating */
         {
             CMD_DEAUTH_BODY d;
@@ -999,6 +1283,8 @@ static VOID iw620_do_connect(PWIFI_ADAPTER a) {
             RtlCopyMemory(a->assoc_bssid, target->bssid, 6);
             a->cur_phy_id = target->phy_id;
             diag_write_dword(L"AssocState", 1);
+            iw620_set_auto_rate(a);           /* v1.0.9.3: unpin rate control (MCS8 -> auto up to MCS15) */
+            iw620_update_connected_rssi(a);   /* v1.0.9: real signal bars right after connect */
         }
 
         /* 3. ASSOCIATION_COMPLETION, followed by the association request body,
@@ -1153,73 +1439,95 @@ static VOID iw620_set_key(PWIFI_ADAPTER a, const UCHAR *mac, UCHAR idx, BOOLEAN 
 }
 
 /* ---- TX & RX Data Path (802.11 <-> 802.3 + IW620 TxPD/RxPD) ------------------ */
-static VOID iw620_poll_rx(PWIFI_ADAPTER a) {
-    if (!a->hw_ready || a->paused || a->halting) return;
+static BOOLEAN iw620_poll_rx(PWIFI_ADAPTER a) {
+    if (!a->hw_ready || a->paused || a->halting) return FALSE;
+    BOOLEAN any = FALSE;
 
-    ULONG ptr = r32(a, ADMA_CHAN1_Q0 + ADMA_DST_RW_PTR);
-    ULONG hw_rd = (ptr >> 16) & 0x1FFFu;
+    DOT11_EXTSTA_RECV_CONTEXT rctx;
+    RtlZeroMemory(&rctx, sizeof(rctx));
+    rctx.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    rctx.Header.Revision = DOT11_EXTSTA_RECV_CONTEXT_REVISION_1;
+    rctx.Header.Size = sizeof(rctx);
+    rctx.uReceiveFlags = 0;
+    rctx.uPhyId = a->cur_phy_id;
+    rctx.uChCenterFrequency = chan_to_freq_khz(a->cur_channel ? a->cur_channel : 1) / 1000u;
+    rctx.lRSSI = a->conn_rssi;
+    rctx.ucDataRate = 108;
 
-    while (a->rx_rd != hw_rd) {
-        ULONG slot = a->rx_rd & (RX_RING_SIZE - 1);
-        UCHAR *raw = a->rx_pool + slot * RX_BUF_STRIDE;
-        PCIE_IF_HDR *ifh = (PCIE_IF_HDR *)raw;
-        if (ifh->type == MLAN_TYPE_DATA && ifh->len >= sizeof(PCIE_IF_HDR) + sizeof(IW620_RXPD)) {
-            IW620_RXPD *rxpd = (IW620_RXPD *)(raw + sizeof(PCIE_IF_HDR));
-            ULONG eth_off = sizeof(PCIE_IF_HDR) + rxpd->rx_pkt_offset;
-            ULONG eth_len = rxpd->rx_pkt_length;
-            if (eth_len >= 14 && eth_off + eth_len <= RX_BUF_STRIDE && eth_len <= 1600) {
-                const UCHAR *eth = raw + eth_off;
-                /* Convert 802.3 (14B) -> 802.11 FromDS data (24B) + LLC/SNAP (8B) */
-                UCHAR *d11 = a->rx_dot11_buf[slot];
-                RtlZeroMemory(d11, 32);
-                d11[0] = 0x08; /* Data */
-                d11[1] = 0x02; /* FromDS */
-                RtlCopyMemory(d11 + 4,  eth, 6);            /* Addr1 = DA */
-                RtlCopyMemory(d11 + 10, a->assoc_bssid, 6); /* Addr2 = BSSID */
-                RtlCopyMemory(d11 + 16, eth + 6, 6);        /* Addr3 = SA */
-                /* LLC/SNAP header */
-                d11[24] = 0xAA; d11[25] = 0xAA; d11[26] = 0x03;
-                d11[27] = 0x00; d11[28] = 0x00; d11[29] = 0x00;
-                d11[30] = eth[12]; d11[31] = eth[13];       /* EtherType */
-                ULONG pay_len = eth_len - 14;
-                if (pay_len) RtlCopyMemory(d11 + 32, eth + 14, pay_len);
-                ULONG d11_len = 32 + pay_len;
+    for (ULONG pass = 0; pass < 3; pass++) {
+        ULONG ptr = r32(a, ADMA_CHAN1_Q0 + ADMA_DST_RW_PTR);
+        ULONG hw_rd = (ptr >> 16) & 0x1FFFu;
+        if (a->rx_rd == hw_rd) break;
 
-                PNET_BUFFER_LIST nbl = a->rx_nbl[slot];
-                PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(nbl);
-                MmInitializeMdl(a->rx_mdl[slot], d11, d11_len);
-                MmBuildMdlForNonPagedPool(a->rx_mdl[slot]);
-                NET_BUFFER_FIRST_MDL(nb) = a->rx_mdl[slot];
-                NET_BUFFER_CURRENT_MDL(nb) = a->rx_mdl[slot];
-                NET_BUFFER_CURRENT_MDL_OFFSET(nb) = 0;
-                NET_BUFFER_DATA_OFFSET(nb) = 0;
-                NET_BUFFER_DATA_LENGTH(nb) = d11_len;
+        PNET_BUFFER_LIST head = NULL, tail = NULL;
+        ULONG count = 0;
+        ULONG drained = 0;
 
-                DOT11_EXTSTA_RECV_CONTEXT rctx;
-                RtlZeroMemory(&rctx, sizeof(rctx));
-                rctx.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
-                rctx.Header.Revision = DOT11_EXTSTA_RECV_CONTEXT_REVISION_1;
-                rctx.Header.Size = sizeof(rctx);
-                rctx.uReceiveFlags = 0;
-                rctx.uPhyId = a->cur_phy_id;
-                rctx.uChCenterFrequency = chan_to_freq_khz(a->cur_channel ? a->cur_channel : 1) / 1000u;
-                rctx.lRSSI = -50;
-                rctx.ucDataRate = 108;
-                NET_BUFFER_LIST_INFO(nbl, MediaSpecificInformation) = &rctx;
+        while (a->rx_rd != hw_rd && drained < RX_RING_SIZE) {
+            ULONG slot = a->rx_rd & (RX_RING_SIZE - 1);
+            UCHAR *raw = a->rx_pool + slot * RX_BUF_STRIDE;
+            PCIE_IF_HDR *ifh = (PCIE_IF_HDR *)raw;
+            if (ifh->type == MLAN_TYPE_DATA && ifh->len >= sizeof(PCIE_IF_HDR) + sizeof(IW620_RXPD)) {
+                IW620_RXPD *rxpd = (IW620_RXPD *)(raw + sizeof(PCIE_IF_HDR));
+                a->last_rx_rate = rxpd->rx_rate;
+                a->last_rx_rate_info = rxpd->rate_info;
+                ULONG eth_off = sizeof(PCIE_IF_HDR) + rxpd->rx_pkt_offset;
+                ULONG eth_len = rxpd->rx_pkt_length;
+                if (rxpd->rx_pkt_type == PKT_TYPE_AMSDU || eth_len > 1600) {
+                    a->rx_amsdu_drop++;
+                } else if (eth_len >= 14 && eth_off + eth_len <= RX_BUF_STRIDE) {
+                    const UCHAR *eth = raw + eth_off;
+                    UCHAR *d11 = a->rx_dot11_buf[slot];
+                    RtlZeroMemory(d11, 32);
+                    d11[0] = 0x08; /* Data */
+                    d11[1] = 0x02; /* FromDS */
+                    RtlCopyMemory(d11 + 4,  eth, 6);            /* Addr1 = DA */
+                    RtlCopyMemory(d11 + 10, a->assoc_bssid, 6); /* Addr2 = BSSID */
+                    RtlCopyMemory(d11 + 16, eth + 6, 6);        /* Addr3 = SA */
+                    d11[24] = 0xAA; d11[25] = 0xAA; d11[26] = 0x03;
+                    d11[27] = 0x00; d11[28] = 0x00; d11[29] = 0x00;
+                    d11[30] = eth[12]; d11[31] = eth[13];       /* EtherType */
+                    ULONG pay_len = eth_len - 14;
+                    if (pay_len) RtlCopyMemory(d11 + 32, eth + 14, pay_len);
+                    ULONG d11_len = 32 + pay_len;
 
-                NdisMIndicateReceiveNetBufferLists(a->handle, nbl, 0, 1, NDIS_RECEIVE_FLAGS_RESOURCES);
-                a->rx_ok++;
-                a->rx_bytes += d11_len;
+                    PNET_BUFFER_LIST nbl = a->rx_nbl[slot];
+                    PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(nbl);
+                    NET_BUFFER_LIST_NEXT_NBL(nbl) = NULL;
+                    MmInitializeMdl(a->rx_mdl[slot], d11, d11_len);
+                    MmBuildMdlForNonPagedPool(a->rx_mdl[slot]);
+                    NET_BUFFER_FIRST_MDL(nb) = a->rx_mdl[slot];
+                    NET_BUFFER_CURRENT_MDL(nb) = a->rx_mdl[slot];
+                    NET_BUFFER_CURRENT_MDL_OFFSET(nb) = 0;
+                    NET_BUFFER_DATA_OFFSET(nb) = 0;
+                    NET_BUFFER_DATA_LENGTH(nb) = d11_len;
+                    NET_BUFFER_LIST_INFO(nbl, MediaSpecificInformation) = &rctx;
+
+                    if (!head) head = nbl;
+                    else NET_BUFFER_LIST_NEXT_NBL(tail) = nbl;
+                    tail = nbl;
+                    count++;
+                    a->rx_ok++;
+                    a->rx_bytes += d11_len;
+                    any = TRUE;
+                }
             }
+            /* Re-arm RX descriptor */
+            a->rx_ring[slot].len = (USHORT)RX_BUF_STRIDE;
+            a->rx_ring[slot].pkt_size = 0;
+            a->rx_ring[slot].flags = ADMA_BD_FLAG_INT_EN | ADMA_BD_FLAG_DST_HOST;
+            a->rx_rd = (a->rx_rd + 1) & 0x1FFFu;
+            a->rx_wr = (a->rx_wr + 1) & 0x1FFFu;
+            drained++;
         }
-        /* Re-arm RX descriptor */
-        a->rx_ring[slot].len = (USHORT)RX_BUF_STRIDE;
-        a->rx_ring[slot].pkt_size = 0;
-        a->rx_ring[slot].flags = ADMA_BD_FLAG_INT_EN | ADMA_BD_FLAG_DST_HOST;
-        a->rx_rd = (a->rx_rd + 1) & 0x1FFFu;
-        a->rx_wr = (a->rx_wr + 1) & 0x1FFFu;
+        /* Single batched MMIO doorbell write + single batched NDIS receive indication */
+        KeMemoryBarrier();
         w32(a, ADMA_CHAN1_Q0 + ADMA_DST_RW_PTR, a->rx_wr);
+        if (head) {
+            NdisMIndicateReceiveNetBufferLists(a->handle, head, 0, count, NDIS_RECEIVE_FLAGS_RESOURCES);
+        }
     }
+    return any;
 }
 
 static VOID iw620_poll_events(PWIFI_ADAPTER a) {
@@ -1235,6 +1543,36 @@ static VOID iw620_poll_events(PWIFI_ADAPTER a) {
 
     while (a->evt_rd != hw_rd) {
         ULONG slot = a->evt_rd & (EVT_RING_SIZE - 1);
+        /* v1.0.9.6: accept the AP's ADDBA (Block Ack) request so RX A-MPDU aggregation turns on. It was
+           ignored before, so the AP sent unaggregated single frames -> downlink stuck ~17 Mbit/s even at a
+           good PHY rate. Event buffer: PCIE_IF_HDR(4) + event_cause(4) + body. ADDBA body = ADDBA_REQ:
+           [0]result [1..6]peer_mac [7]dialog_token [8..9]block_ack_param_set [10..11]tmo [12..13]ssn.
+           Reply with CMD_11N_ADDBA_RSP, status ACCEPT, echoing the params (mlan wlan_cmd_11n_addba_rspgen). */
+        const UCHAR *ev = a->evt_pool + (ULONGLONG)slot * EVT_BUF_STRIDE;
+        const PCIE_IF_HDR *eh = (const PCIE_IF_HDR *)ev;
+        if (eh->type == MLAN_TYPE_EVENT && eh->len >= 22 && eh->len <= EVT_BUF_STRIDE &&
+            *(const ULONG *)(ev + 4) == EVENT_ADDBA) {
+            const UCHAR *body = ev + 8;
+            UCHAR rsp[16];
+            USHORT param = *(const USHORT *)(body + 8);
+            /* v1.0.9.7: clear AMSDU_SUPP (bit 0) because our RX path expects single Ethernet frames,
+               not A-MSDU inside A-MPDU (leaving bit 0 set caused the AP to send >1600 B A-MSDUs which
+               were dropped in 1.0.9.6). Clamp BA window to 64 (<= RX_RING_SIZE/2). */
+            param &= (USHORT)~0x0001u;
+            USHORT win = (USHORT)((param >> 6) & 0x3FFu);
+            if (win == 0 || win > 64u) win = 64u;
+            param = (USHORT)((param & 0x003Fu) | (win << 6));
+            rsp[0] = 0;                                              /* add_rsp_result */
+            RtlCopyMemory(rsp + 1, body + 1, 6);                    /* peer_mac_addr */
+            rsp[7] = body[7];                                        /* dialog_token */
+            *(USHORT *)(rsp + 8)  = 0;                               /* status_code = ADDBA_RSP_STATUS_ACCEPT */
+            *(USHORT *)(rsp + 10) = param;                           /* block_ack_param_set (A-MPDU, no A-MSDU) */
+            *(USHORT *)(rsp + 12) = *(const USHORT *)(body + 10);    /* block_ack_tmo */
+            *(USHORT *)(rsp + 14) = *(const USHORT *)(body + 12);    /* ssn */
+            a->addba_count++;
+            if (iw620_exec_cmd(a, CMD_11N_ADDBA_RSP, rsp, sizeof(rsp), NULL, NULL, 500))
+                a->addba_ok++;
+        }
         a->evt_ring[slot].len = (USHORT)EVT_BUF_STRIDE;
         a->evt_ring[slot].pkt_size = 0;
         a->evt_ring[slot].flags = ADMA_BD_FLAG_INT_EN | ADMA_BD_FLAG_DST_HOST;
@@ -1248,15 +1586,23 @@ static VOID iw620_poll_events(PWIFI_ADAPTER a) {
     }
 }
 
-static VOID PollTimer(PVOID sys1, PVOID ctx, PVOID sys2, PVOID sys3) {
-    UNREFERENCED_PARAMETER(sys1); UNREFERENCED_PARAMETER(sys2); UNREFERENCED_PARAMETER(sys3);
+/* v1.0.9.9: adaptive high-resolution kernel timer (EX_TIMER_HIGH_RESOLUTION).
+   NdisSetTimerObject is quantized to Windows' 15.625 ms system clock (64 Hz), which capped a 128-slot
+   RX ring at ~105 Mbit/s. ExSetTimer with EX_TIMER_HIGH_RESOLUTION fires at 0.25 ms (4000 Hz) while
+   traffic is flowing and drops back to 4 ms (250 Hz, ~0% CPU) 50 ms after the last packet. */
+static VOID HighResPollTimer(PEX_TIMER timer, PVOID ctx) {
+    UNREFERENCED_PARAMETER(timer);
     PWIFI_ADAPTER a = (PWIFI_ADAPTER)ctx;
-    if (a->halting) return;
+    if (!a || a->halting) return;
     iw620_poll_events(a);
-    iw620_poll_rx(a);
-    LARGE_INTEGER due;
-    due.QuadPart = -(LONGLONG)POLL_MS * 10000LL;
-    NdisSetTimerObject(a->timer, due, 0, NULL);
+    BOOLEAN got = iw620_poll_rx(a);
+    ULONGLONG now = KeQueryInterruptTime();
+    if (got) a->rx_active_until = now + 500000ull; /* stay in 0.25 ms fast mode for 50 ms */
+    LONGLONG due = (now < a->rx_active_until) ? -2500LL : -40000LL; /* 0.25 ms active / 4 ms idle */
+    EXT_SET_PARAMETERS sp;
+    ExInitializeSetTimerParameters(&sp);
+    sp.NoWakeTolerance = 0;
+    ExSetTimer(a->hr_timer, due, 0, &sp);
 }
 
 static VOID MiniportSendNbls(NDIS_HANDLE ctx, PNET_BUFFER_LIST nbl_list, NDIS_PORT_NUMBER port, ULONG flags) {
@@ -1408,6 +1754,12 @@ static NDIS_STATUS MiniportOidRequest(NDIS_HANDLE ctx, PNDIS_OID_REQUEST req) {
 
     if (req->RequestType == NdisRequestQueryInformation || req->RequestType == NdisRequestQueryStatistics) {
         NDIS_OID oid = req->DATA.QUERY_INFORMATION.Oid;
+        /* v1.0.9.2 DIAGNOSTIC: piggy-back the TX-rate sample on any query OID (this path is PASSIVE and
+           NDIS-serialised, so the registry write + exec_cmd are safe). Rate-limited to ~once/200 ms. */
+        if (a->connected) {
+            ULONGLONG now = KeQueryInterruptTime();
+            if (now - a->rate_sample_t > 2000000ull) { a->rate_sample_t = now; iw620_update_tx_rate(a); }
+        }
         PVOID buf = req->DATA.QUERY_INFORMATION.InformationBuffer;
         ULONG len = req->DATA.QUERY_INFORMATION.InformationBufferLength;
         ULONG out = 0, need = 0;
@@ -1427,7 +1779,7 @@ static NDIS_STATUS MiniportOidRequest(NDIS_HANDLE ctx, PNDIS_OID_REQUEST req) {
         case OID_GEN_MAXIMUM_TOTAL_SIZE:
             v32 = 1514; out = 4; break;
         case OID_GEN_LINK_SPEED:
-            v32 = 3000000; out = 4; break; /* 300 Mbps in 100 bps units */
+            v32 = (ULONG)((a->link_speed_bps ? a->link_speed_bps : 300000000ULL) / 100ULL); out = 4; break;
         case OID_GEN_TRANSMIT_BUFFER_SPACE:
         case OID_GEN_RECEIVE_BUFFER_SPACE:
             v32 = 65536; out = 4; break;
@@ -1761,9 +2113,13 @@ static NDIS_STATUS MiniportOidRequest(NDIS_HANDLE ctx, PNDIS_OID_REQUEST req) {
             si->Header.Revision = NDIS_STATISTICS_INFO_REVISION_1;
             si->Header.Size = NDIS_SIZEOF_STATISTICS_INFO_REVISION_1;
             si->SupportedStatistics = NDIS_STATISTICS_FLAGS_VALID_DIRECTED_FRAMES_RCV |
-                                      NDIS_STATISTICS_FLAGS_VALID_DIRECTED_FRAMES_XMIT;
+                                      NDIS_STATISTICS_FLAGS_VALID_DIRECTED_FRAMES_XMIT |
+                                      NDIS_STATISTICS_FLAGS_VALID_BYTES_RCV |
+                                      NDIS_STATISTICS_FLAGS_VALID_BYTES_XMIT;
             si->ifHCInUcastPkts = a->rx_ok;
             si->ifHCOutUcastPkts = a->tx_ok;
+            si->ifHCInOctets = a->rx_bytes;
+            si->ifHCOutOctets = a->tx_bytes;
             out = need; break;
         }
         default:
@@ -1869,6 +2225,7 @@ static NDIS_STATUS MiniportOidRequest(NDIS_HANDLE ctx, PNDIS_OID_REQUEST req) {
             break;
         case OID_DOT11_SCAN_REQUEST:
             iw620_do_scan(a);
+            iw620_update_connected_rssi(a);   /* v1.0.9: keep the connected signal bars fresh on each scan */
             break;
         case OID_DOT11_CONNECT_REQUEST:
             iw620_do_connect(a);
@@ -1943,7 +2300,7 @@ static NDIS_STATUS MiniportOidRequest(NDIS_HANDLE ctx, PNDIS_OID_REQUEST req) {
 /* ---- Miniport Lifecycle ------------------------------------------------------ */
 static VOID free_adapter(PWIFI_ADAPTER a) {
     if (!a) return;
-    if (a->timer) NdisFreeTimerObject(a->timer);
+    if (a->hr_timer) ExDeleteTimer(a->hr_timer, TRUE, TRUE, NULL);
     for (ULONG i = 0; i < RX_RING_SIZE; i++) {
         if (a->rx_nbl[i]) NdisFreeNetBufferList(a->rx_nbl[i]);
         if (a->rx_mdl[i]) IoFreeMdl(a->rx_mdl[i]);
@@ -1994,6 +2351,7 @@ static NDIS_STATUS MiniportInitializeEx(NDIS_HANDLE handle, NDIS_HANDLE drv_ctx,
     RtlZeroMemory(a, sizeof(*a));
     a->handle = handle;
     a->radio_on = TRUE;
+    a->conn_rssi = -50;   /* v1.0.9: sane default until CMD_RSSI_INFO fills the live link RSSI */
     a->op_mode = DOT11_OPERATION_MODE_EXTENSIBLE_STATION;
     a->desired_bss_type = dot11_BSS_type_infrastructure;
     a->auth_algo = DOT11_AUTH_ALGO_RSNA_PSK;
@@ -2097,8 +2455,8 @@ static NDIS_STATUS MiniportInitializeEx(NDIS_HANDLE handle, NDIS_HANDLE drv_ctx,
     gen.MediaType = NdisMediumNative802_11;
     gen.PhysicalMediumType = NdisPhysicalMediumNative802_11;
     gen.MtuSize = 1500;
-    gen.MaxXmitLinkSpeed = 300000000ULL;
-    gen.MaxRcvLinkSpeed  = 300000000ULL;
+    gen.MaxXmitLinkSpeed = 1201000000ULL;
+    gen.MaxRcvLinkSpeed  = 1201000000ULL;
     gen.XmitLinkSpeed = NDIS_LINK_SPEED_UNKNOWN;
     gen.RcvLinkSpeed  = NDIS_LINK_SPEED_UNKNOWN;
     gen.MediaConnectState = MediaConnectStateDisconnected;
@@ -2222,21 +2580,17 @@ static NDIS_STATUS MiniportInitializeEx(NDIS_HANDLE handle, NDIS_HANDLE drv_ctx,
         return st;
     }
 
-    /* Start 2ms RX polling timer */
-    NDIS_TIMER_CHARACTERISTICS tc;
-    RtlZeroMemory(&tc, sizeof(tc));
-    tc.Header.Type = NDIS_OBJECT_TYPE_TIMER_CHARACTERISTICS;
-    tc.Header.Revision = NDIS_TIMER_CHARACTERISTICS_REVISION_1;
-    tc.Header.Size = NDIS_SIZEOF_TIMER_CHARACTERISTICS_REVISION_1;
-    tc.AllocationTag = PS5WIFI_TAG;
-    tc.TimerFunction = PollTimer;
-    tc.FunctionContext = a;
-    st = NdisAllocateTimerObject(handle, &tc, &a->timer);
-    if (st != NDIS_STATUS_SUCCESS) { free_adapter(a); return st; }
+    a->rx_active_until = 0;
 
-    LARGE_INTEGER due;
-    due.QuadPart = -(LONGLONG)POLL_MS * 10000LL;
-    NdisSetTimerObject(a->timer, due, 0, NULL);
+    /* v1.0.9.9: start adaptive high-resolution RX/Event timer (0.25 ms active / 4 ms idle) */
+    a->hr_timer = ExAllocateTimer(HighResPollTimer, a, EX_TIMER_HIGH_RESOLUTION);
+    if (!a->hr_timer) { free_adapter(a); return NDIS_STATUS_RESOURCES; }
+    {
+        EXT_SET_PARAMETERS sp;
+        ExInitializeSetTimerParameters(&sp);
+        sp.NoWakeTolerance = 0;
+        ExSetTimer(a->hr_timer, -40000LL, 0, &sp);
+    }
 
     return NDIS_STATUS_SUCCESS;
 }
@@ -2253,7 +2607,8 @@ static VOID MiniportHaltEx(NDIS_HANDLE ctx, NDIS_HALT_ACTION action) {
     UNREFERENCED_PARAMETER(action);
     PWIFI_ADAPTER a = (PWIFI_ADAPTER)ctx;
     InterlockedExchange(&a->halting, 1);
-    if (a->timer) NdisCancelTimerObject(a->timer);
+    if (a->hr_timer) { ExDeleteTimer(a->hr_timer, TRUE, TRUE, NULL); a->hr_timer = NULL; }
+    KeFlushQueuedDpcs();   /* v1.0.9.4: drain any in-flight RX DPC (halting=1 stops it re-queuing) */
     /* v1.0.7: no FUNC_SHUTDOWN - after it the IW620 core stays down (every register 0xFFFFFFFF, no FLR, a bus reset does not
      * revive it) until the console is powered off, so a driver restart or a Windows restart left Wi-Fi dead. Bus mastering
      * off stops its DMA; the firmware keeps running and the next start finds it ready (FIRMWARE_READY_PCIE). */
@@ -2293,7 +2648,7 @@ static VOID MiniportShutdownEx(NDIS_HANDLE ctx, NDIS_SHUTDOWN_ACTION action) {
     PWIFI_ADAPTER a = (PWIFI_ADAPTER)ctx;
     InterlockedExchange(&a->halting, 1);
     if (action != NdisShutdownPowerOff || KeGetCurrentIrql() > DISPATCH_LEVEL) return;
-    if (a->timer) NdisCancelTimerObject(a->timer);
+    if (a->hr_timer) ExCancelTimer(a->hr_timer, NULL);
     if (a->hw_ready) {
         if (a->connected) {
             CMD_DEAUTH_BODY d;

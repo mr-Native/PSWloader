@@ -193,8 +193,8 @@ typedef struct { PS5PWR_GFXCLK_OUT b; ULONG query_mhz, freq_mhz; } PS5PWR_GFXCLK
 #define IOCTL_PS5PWR_VERSION CTL_CODE(0x8002, 0x90A, METHOD_BUFFERED, FILE_READ_ACCESS)   /* v1.12.1 = 0x80026428 */
 typedef struct { ULONG size, major, minor, patch, caps; } PS5PWR_VERSION_OUT;
 #define PS5PWR_VER_MAJOR 1u
-#define PS5PWR_VER_MINOR 18u
-#define PS5PWR_VER_PATCH 4u
+#define PS5PWR_VER_MINOR 20u
+#define PS5PWR_VER_PATCH 0u
 #define PS5PWR_CAPS (0x08u | 0x10u | 0x20u | 0x40u | 0x80u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u | 0x2000u | 0x4000u)   /* v1.18.0: 0x4000 hotplug FLAVA3+VERDE, on by default */   /* v1.17.0: 0x2000 PS5 Linux fan curve in the driver */   /* v1.16.0: 0x1000 warm restart left to the firmware */   /* v1.15.0: 0x400 op 21 boost window ceiling, 0x800 BAPM op 3 GFX CAC scale */   /* v1.14.0: 0x200 OC ops 7..20 */   /* v1.13: 0x100 hotplug pick + program */
 #define IOCTL_PS5PWR_HP_PICK CTL_CODE(0x8002, 0x90D, METHOD_BUFFERED, FILE_READ_ACCESS)      /* v1.13 = 0x80026434 */
 #define IOCTL_PS5PWR_HP_PROGRAM CTL_CODE(0x8002, 0x90E, METHOD_BUFFERED, FILE_WRITE_ACCESS)  /* v1.13 = 0x8002a438 */
@@ -264,7 +264,9 @@ typedef struct _EXT {
     KEVENT hp_seq;                        /* binary semaphore (signalled = free): one FLAVA3 stage sequence at a time */
     PKEVENT pick_event; HANDLE pick_handle;   /* \BaseNamedObjects\PswHotplug */
     /* v1.17 PS5 Linux fan curve (thread + S5 path, always under icc_lock) */
-    ULONG fc_cfg, fc_tries, fc_errors, fc_ticks, fc_polls;
+    ULONG fc_cfg, fc_preset, fc_tries, fc_errors, fc_ticks, fc_polls;
+    UCHAR fc_custom[PS5_FC_CUSTOM_BYTES];
+    BOOLEAN fc_custom_ok;
     LONG fc_phase, fc_wire_mode, fc_last_temp;
     BOOLEAN fc_original_ok, fc_fault;
     ULONGLONG fc_retry_at;
@@ -716,6 +718,21 @@ static ULONG reg_dword(PCWSTR name, ULONG def)
     ZwClose(h);
     return NT_SUCCESS(st) && p->Type == REG_DWORD && p->DataLength == sizeof(ULONG) ? *(ULONG *)p->Data : def;
 }
+static BOOLEAN reg_binary(PCWSTR name, PVOID out, ULONG exact_len)
+{
+    OBJECT_ATTRIBUTES oa; HANDLE h; UNICODE_STRING v; ULONG len = 0;
+    ULONG buf[(sizeof(KEY_VALUE_PARTIAL_INFORMATION) + 32 + 3) / 4];
+    PKEY_VALUE_PARTIAL_INFORMATION p = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+    if (!g_params.Length || exact_len > 32) return FALSE;
+    InitializeObjectAttributes(&oa, &g_params, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&h, KEY_READ, &oa))) return FALSE;
+    RtlInitUnicodeString(&v, name);
+    NTSTATUS st = ZwQueryValueKey(h, &v, KeyValuePartialInformation, p, sizeof(buf), &len);
+    ZwClose(h);
+    if (!NT_SUCCESS(st) || p->Type != REG_BINARY || p->DataLength != exact_len) return FALSE;
+    RtlCopyMemory(out, p->Data, exact_len);
+    return TRUE;
+}
 static void reg_set(PCWSTR name, ULONG type, const void *data, ULONG bytes)
 {
     OBJECT_ATTRIBUTES oa; HANDLE h; UNICODE_STRING v; ULONG disp;
@@ -1146,9 +1163,11 @@ static NTSTATUS fc_start(PEXT e, const uint8_t *table)
     st = fc_read_duty(e, &duty);
     if (!NT_SUCCESS(st)) return st;
     ps5_fc_init(&e->fc, ps5_fc_duty_to_pwm(e->fc_original[2] | e->fc_original[3] << 8), ps5_fc_duty_to_pwm(duty));
+    if (e->fc_preset == PS5_FC_PRESET_CUSTOM && e->fc_custom_ok) ps5_fc_set_custom(&e->fc, e->fc_custom);
+    else ps5_fc_set_preset(&e->fc, e->fc_preset);
     e->fc_phase = FC_RUNNING;
     if (!e->fc_bug_reg) e->fc_bug_reg = KeRegisterBugCheckCallback(&e->fc_bug, fc_bugcheck, e, sizeof(*e), (PUCHAR)"ps5pwr-fan");
-    ps5_hp_log(e, "fan: quiet curve on, MainSoC %d mC, duty %u", t, duty);
+    ps5_hp_log(e, "fan: quiet curve on (preset %lu), MainSoC %d mC, duty %u", e->fc_preset, t, duty);
     return fc_tick(e);
 }
 static void fc_stop_locked(PEXT e, const char *why, int keep_quiet)
@@ -1170,7 +1189,25 @@ static void fc_stop(PEXT e, const char *why, int keep_quiet)
 }
 static void fc_service(PEXT e)                               /* hotplug thread, every 500 ms */
 {
-    if (!(e->fc_polls++ & 1)) e->fc_cfg = reg_dword(L"FanCurve", 1) ? 1 : 0;   /* once per second */
+    if (!(e->fc_polls++ & 1)) {                              /* once per second */
+        e->fc_cfg = reg_dword(L"FanCurve", 1) ? 1 : 0;
+        ULONG pr = reg_dword(L"FanPreset", PS5_FC_PRESET_STANDARD);
+        if (pr > PS5_FC_PRESET_CUSTOM) pr = PS5_FC_PRESET_STANDARD;
+        UCHAR raw[PS5_FC_CUSTOM_BYTES];
+        BOOLEAN has_custom = (pr == PS5_FC_PRESET_CUSTOM) && reg_binary(L"FanCustomCurve", raw, PS5_FC_CUSTOM_BYTES);
+        BOOLEAN custom_changed = has_custom && (!e->fc_custom_ok || RtlCompareMemory(raw, e->fc_custom, PS5_FC_CUSTOM_BYTES) != PS5_FC_CUSTOM_BYTES);
+        if (has_custom) { RtlCopyMemory(e->fc_custom, raw, PS5_FC_CUSTOM_BYTES); e->fc_custom_ok = TRUE; }
+        if (pr != e->fc_preset || custom_changed) {
+            if (e->fc_phase == FC_RUNNING) {
+                icc_acquire(e);
+                if (pr == PS5_FC_PRESET_CUSTOM && e->fc_custom_ok) ps5_fc_set_custom(&e->fc, e->fc_custom);
+                else ps5_fc_set_preset(&e->fc, pr);
+                icc_release(e);
+                ps5_hp_log(e, "fan: preset %lu -> %lu%s", e->fc_preset, pr, custom_changed ? " (custom updated)" : "");
+            }
+            e->fc_preset = pr;
+        }
+    }
     if (e->btn_sx) return;                                    /* leaving S0: dispatch_power restored the table */
     if (!e->fc_cfg) { fc_stop(e, "FanCurve 0", 0); e->fc_tries = 0; return; }
     if (e->fc_phase == FC_RUNNING) { icc_acquire(e); (void)fc_tick(e); icc_release(e); return; }

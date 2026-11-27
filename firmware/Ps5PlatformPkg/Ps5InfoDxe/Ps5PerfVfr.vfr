@@ -1,4 +1,5 @@
-// Ps5InfoDxe v1.1 (r5.22): tab "Performance & Fan" - power profile, fan (info), CPU P-states under "Advanced".
+// Ps5InfoDxe v1.2 (r5.28.15): Power Presets moved to Windows PSWloader Dashboard (Power & Fan tab);
+// UEFI tab keeps only the info note and CPU P-states under "Advanced".
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Uefi/UefiMultiPhase.h>
 #include "../Include/Ps5PowerPreset.h"
@@ -6,17 +7,8 @@
 #define PS5_PERF_FORMSET_GUID {0x9c1e5f2a,0x1360,0x4e1b,{0xb0,0x5e,0x13,0x60,0x0e,0xf1,0x00,0x0a}}
 formset
   guid = PS5_PERF_FORMSET_GUID, title = STRING_TOKEN(STR_PERF_TITLE), help = STRING_TOKEN(STR_PERF_HELP), classguid = PS5_FRONT_PAGE_CLASS,
-  efivarstore PS5_POWER_PRESET, attribute = 0x00000006, name = Ps5PowerPreset, guid = PS5_POWER_PRESET_GUID;
   efivarstore PS5_PSTATES, attribute = 0x00000006, name = Ps5PStates, guid = PS5_POWER_PRESET_GUID;
   form formid = 1, title = STRING_TOKEN(STR_PERF_TITLE);
-    subtitle text = STRING_TOKEN(STR_PERF_SUB);
-    oneof varid = Ps5PowerPreset.Preset, questionid = PS5_POWER_KEY,
-      prompt = STRING_TOKEN(STR_PWR), help = STRING_TOKEN(STR_PWR_HELP), flags = INTERACTIVE,
-      option text = STRING_TOKEN(STR_PWR_EFF), value = PS5_POWER_EFFICIENCY, flags = 0;
-      option text = STRING_TOKEN(STR_PWR_STD), value = PS5_POWER_STANDARD, flags = DEFAULT;
-      option text = STRING_TOKEN(STR_PWR_OC), value = PS5_POWER_OC, flags = 0;
-    endoneof;
-    subtitle text = STRING_TOKEN(STR_NULL);
     subtitle text = STRING_TOKEN(STR_FAN_SUB);
     text help = STRING_TOKEN(STR_FAN_HELP), text = STRING_TOKEN(STR_FAN_L), text = STRING_TOKEN(STR_FAN_V);
     subtitle text = STRING_TOKEN(STR_NULL);

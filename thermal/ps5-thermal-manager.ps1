@@ -1,7 +1,10 @@
-﻿# ps5-thermal-manager.ps1 v1.8.1 (26.11.2026; v1.8.1 = the log can never stop the manager: every row goes through Write-LogRow
+# ps5-thermal-manager.ps1 v1.8.1 (26.11.2026; v1.8.1 = the log can never stop the manager: every row goes through Write-LogRow
 #   (append with shared access, 3 tries, else the row is dropped). Until now a failed Add-Content - another program reading or
 #   copying thermal-manager.jsonl in that moment - ended the whole script (ErrorActionPreference Stop; HW 26.11. 16:40:55: exit 1,
 #   no thermal and GPU clock control until the next sign-in). The PSWloader Dashboard reads this log every second.)
+# ps5-thermal-manager.ps1 v1.8.1 (27.11.2026; v1.8.1 = fix post-BapmInit GPU clock stuck at 2000 MHz: BapmInit resets SMU
+#   gfxclk to 2000 MHz after line 400 had already cached $gpuSet=2225, and Floor(2230/25)*25=2225 meant the controller never
+#   restored 2230 MHz; now refreshes $gpuSet from BapmInit readback, restores $MaxMhz immediately, and allows $want=$MaxMhz)
 # ps5-thermal-manager.ps1 v1.8.0 (24.11.2026; v1.8.0 = with ps5pwr 1.17+ (caps 0x2000) the driver runs the PS5 Linux fan curve:
 #   no fan target writes here any more (event fan_driver_curve), fan_status telemetry stays)
 # ps5-thermal-manager.ps1 v1.7.0 (18.11.2026; v1.7.0 = real OC through ps5pwr 1.14.0 (caps 0x200), clock regulator, no curve:
@@ -295,8 +298,19 @@ function Get-PowerIndex([string]$alias) {   # current AC/DC index from powercfg 
          ForEach-Object { $_.Matches } | ForEach-Object { $_.Value })
   if ($h.Count -ge 2) { return @([Convert]::ToInt32($h[-2], 16), [Convert]::ToInt32($h[-1], 16)) } else { return $null }
 }
+function Set-FanPresetReg([string]$p) {   # v1.8.3 / ps5pwr v1.20.0: seed ps5pwr\Parameters\FanPreset only when unset (never clobber Dashboard FanPreset/Custom)
+  if ($p -eq 'power') { $p = 'oc' }
+  $n = if ($p -eq 'efficiency') { 0 } elseif ($p -eq 'oc') { 2 } else { 1 }
+  try {
+    $k = 'HKLM:\SYSTEM\CurrentControlSet\Services\ps5pwr\Parameters'
+    if ((Test-Path $k) -and ($null -eq (Get-ItemProperty -Path $k -Name 'FanPreset' -EA SilentlyContinue).FanPreset)) {
+      New-ItemProperty -Path $k -Name 'FanPreset' -PropertyType DWord -Value $n -Force -EA SilentlyContinue | Out-Null
+    }
+  } catch { }
+}
 function Write-GuardForPreset([string]$p) {   # v1.3.6: same rule as at start: max(guard, target+4, cpu_high)
   if ($p -eq 'power') { $p = 'oc' }
+  Set-FanPresetReg $p
   $t = $PresetTable[$p]; if (-not $t) { return $null }
   $g = [Math]::Max($t.GuardC, [Math]::Max($t.TargetC + 4, $t.CpuHighC))
   try { Set-Content -LiteralPath $GuardFile -Value $g -Encoding ascii; return $g } catch { return $null }
@@ -403,6 +417,7 @@ $cpu = $CpuMaxPercent; Set-CpuMax $cpu
 if ($CpuBoost -ge 0) { powercfg /setacvalueindex scheme_current sub_processor PERFBOOSTMODE $CpuBoost | Out-Null
   powercfg /setdcvalueindex scheme_current sub_processor PERFBOOSTMODE $CpuBoost | Out-Null; powercfg /setactive scheme_current | Out-Null }
 try { Set-Content -LiteralPath $GuardFile -Value $GuardC -Encoding ascii } catch { }
+Set-FanPresetReg $Preset
 W ([ordered]@{ event = 'preset'; driver = $Driver; ps5pwr = $LoadedPs5Pwr; fan_min_c = $FanMinC; oc_max_mhz = $ocMaxApplied; preset = $Preset; source = $src; max_mhz = $MaxMhz; target_c = $TargetC; fan_c = $FanTargetC
   cpu_max = $CpuMaxPercent; cpu_boost = $CpuBoost; cpu_high_c = $CpuHighC; cpu_low_c = $CpuLowC; guard_c = $GuardC
   guard_raised_from = $(if ($guardWanted -ne $GuardC) { $guardWanted } else { $null }); boost_before = $origBoost; oc_fmax_mhz = $OcFmaxMhz
@@ -418,7 +433,16 @@ if ($bapmBoost -and $bootId -and (Test-Path $bapmMark) -and ((Get-Content $bapmM
 }
 if ($bapmBoost) {   # v1.6.3: BAPM weights exactly as PS5 Linux mp1_init, once per boot (v1.6.10), before the boost window
   try { $ba = & $Driver -BapmInit | ConvertFrom-Json; W ([ordered]@{ event = $(if ($ba.bapm.status -eq 0) { 'bapm_init' } else { 'bapm_init_failed' }); result = $ba })
-        if ($ba.bapm.status -eq 0 -and $bootId) { Set-Content -Path $bapmMark -Value $bootId -Encoding ASCII } }
+        if ($ba.bapm.status -eq 0 -and $bootId) { Set-Content -Path $bapmMark -Value $bootId -Encoding ASCII }
+        # v1.8.1: BapmInit calls UniversalModeExit which drops SMU gfxclk to 2000 MHz. Update $gpuSet from the real
+        # post-BAPM clock and immediately restore $MaxMhz so standard/oc do not stay stuck at 1994 MHz for the whole boot.
+        if ($gpu -and $ba.gfxclk -and $ba.gfxclk.status -eq 0 -and [int]$ba.gfxclk.mhz -gt 0) {
+          $gpuSet = [int]$ba.gfxclk.mhz
+          if ($gpuSet -ne $MaxMhz) {
+            $r0 = Request-Gpu $MaxMhz
+            if ($r0 -and $r0.request.status -eq 0) { W ([ordered]@{ event = 'gpu_restore_post_bapm'; from = $gpuSet; to = $MaxMhz; readback = $r0.readback.mhz }); $gpuSet = $MaxMhz; $limit = [double]$MaxMhz }
+          }
+        } }
   catch { W ([ordered]@{ event = 'bapm_init_error'; error = $_.Exception.Message }) }
 }
 $holdWanted = ($Preset -eq 'oc' -and $Hold -and $DriverHasHold -and -not $NoHold)   # v1.6.13; v1.6.15: opt-in -Hold
@@ -515,7 +539,7 @@ while ($true) {
   if ($gpu -and -not $ocGpu) {
     $err = $TargetC - $t; if ([Math]::Abs($err) -le $TempDeadbandC) { $err = 0 }
     $limit = [Math]::Max($MinMhz, [Math]::Min($MaxMhz, $limit + $err * $GainMhzPerC))
-    $want = [int]([Math]::Floor($limit / 25) * 25)
+    $want = if ($limit -ge $MaxMhz) { $MaxMhz } else { [int]([Math]::Floor($limit / 25) * 25) }
     if ([Math]::Abs($want - $gpuSet) -ge $DeadbandMhz -or ($want -eq $MaxMhz -and $gpuSet -ne $MaxMhz)) {
       $r = Request-Gpu $want
       if ($r -and $r.request.status -eq 0) { W ([ordered]@{ event = 'gpu_set'; tctl_c = $t; tctl_raw_c = $raw; from = $gpuSet; to = $want; readback = $r.readback.mhz }); $gpuSet = $want }

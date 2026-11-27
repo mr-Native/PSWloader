@@ -8,9 +8,12 @@
 #define PS5_FC_SERVO_SIZE   0x6ae
 #define PS5_FC_POINTS       8
 #define PS5_FC_EMERGENCY_MC 90000
+#define PS5_FC_EMERGENCY_OC_MC 91000
 #define PS5_FC_SERVICE      0x0a        /* ICC fan service */
 #define PS5_FC_TEMP_SERVICE 0x0b        /* ICC temperature service */
 enum { PS5_FC_MODE_AUTO = 1, PS5_FC_MODE_MAXIMUM = 2, PS5_FC_MODE_MINIMUM = 3, PS5_FC_MODE_MANUAL = 4 };
+enum { PS5_FC_PRESET_EFFICIENCY = 0, PS5_FC_PRESET_STANDARD = 1, PS5_FC_PRESET_OC = 2, PS5_FC_PRESET_CUSTOM = 3 };
+#define PS5_FC_CUSTOM_BYTES 16          /* 8x temp_C (uint8) + 8x duty_pct (uint8) */
 
 struct ps5_fc_curve { int temp[PS5_FC_POINTS]; unsigned pwm[PS5_FC_POINTS]; int stop_temp; };
 
@@ -19,6 +22,7 @@ struct ps5_fc_curve { int temp[PS5_FC_POINTS]; unsigned pwm[PS5_FC_POINTS]; int 
  * *name gets the board/memory text either way. */
 const uint8_t *ps5_fc_board_table(uint64_t board_id_raw, uint16_t gddr6_id, const char **name);
 
+void ps5_fc_preset_curve(struct ps5_fc_curve *c, unsigned preset, unsigned minimum_pwm);
 void ps5_fc_board_curve(struct ps5_fc_curve *c, unsigned minimum_pwm);
 unsigned ps5_fc_interpolate(const struct ps5_fc_curve *c, int temp);
 unsigned ps5_fc_auto_pwm(const struct ps5_fc_curve *c, int raw_temp, int filtered_temp, int *running);
@@ -37,10 +41,15 @@ struct ps5_fc_state {
     int filtered_temp, filtered_valid, running, emergency;
     unsigned rise_steps;                /* v1.19.2: steps (500 ms) the curve has asked for more than requested_pwm */
     unsigned requested_pwm;
+    unsigned preset, min_pwm;           /* v1.20.0: active power preset (0=efficiency, 1=standard, 2=oc) + board min PWM */
+    int rise_now_mc, emergency_mc;      /* v1.20.0: preset-specific instant-rise and emergency thresholds */
 };
-#define PS5_FC_RISE_HOLD_STEPS 20     /* v1.19.2: 10 s at 500 ms per step before the fan goes up (user 26.11.: no short spin-ups) */
-#define PS5_FC_RISE_NOW_MC 80000      /* from 80 C the fan goes up at once */
+#define PS5_FC_RISE_HOLD_STEPS 8      /* v1.20.0 (measured 27.11.): 4 s hold filters desktop spikes without 86 C overshoot under 2219 MHz load */
+#define PS5_FC_RISE_NOW_MC     80000  /* v1.20.0: from 80 C (82 C in oc) ramp smoothly at once to prevent heat-soak */
+#define PS5_FC_RISE_NOW_OC_MC  82000
 void ps5_fc_init(struct ps5_fc_state *s, unsigned minimum_pwm, unsigned current_pwm);
+void ps5_fc_set_preset(struct ps5_fc_state *s, unsigned preset);
+void ps5_fc_set_custom(struct ps5_fc_state *s, const uint8_t raw[PS5_FC_CUSTOM_BYTES]);
 /* Returns PS5_FC_MODE_MAXIMUM (emergency, pwm 255) or PS5_FC_MODE_MANUAL with *pwm to write. */
 int ps5_fc_step(struct ps5_fc_state *s, int temp_milli, unsigned *pwm);
 

@@ -11,7 +11,7 @@ Class       = System
 ClassGUID   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %Mfg%
 CatalogFile = ps5pwr.cat
-DriverVer   = 11/26/2026,1.19.2.0
+DriverVer   = 11/27/2026,1.20.0.0
 PnpLockdown = 1
 
 [Manufacturer]
@@ -19,6 +19,7 @@ PnpLockdown = 1
 
 [PS5.NTamd64]
 %DevDesc% = PS5PWR, PCI\VEN_104D&DEV_9107&SUBSYS_9103104D
+%DevDesc% = PS5PWR, PCI\VEN_104D&DEV_9107
 
 [PS5PWR.NTamd64]
 CopyFiles = PS5PWR.CopyFiles

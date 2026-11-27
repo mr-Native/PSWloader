@@ -9,7 +9,7 @@
 # When nothing is due any more the task removes itself. -Preview <png> [-Page Welcome|WhatsNew] renders a page into a picture.
 param([long]$After = 0, [switch]$Welcome, [switch]$WhatsNew, [string]$Preview = '', [ValidateSet('Welcome', 'WhatsNew')][string]$Page = 'Welcome', [switch]$Show)   # -Show: the -Page once, no marks (Dashboard)
 $ErrorActionPreference = 'Stop'
-$Version = 'v1.2'
+$Version = 'v1.2.1'
 $Url = 'https://buymeacoffee.com/mrnative'
 $NotesUrl = 'https://github.com/mr-Native/PSWloader/releases'
 $key = 'HKLM:\SOFTWARE\PSWloader'
@@ -150,18 +150,12 @@ $welcomeXaml = $open + $style + @'
       <Button x:Name="Close" Style="{StaticResource Btn}" Content="Close" Background="#262626" Foreground="#F2F2F0" BorderBrush="#454545" BorderThickness="1" Margin="12,0,0,0" IsCancel="True" MinWidth="110"/>
 '@)
 
-# What's new: the announcement (X/Twitter) plus a few more, as cards - icon (Segoe MDL2 Assets), title, one short line
+# What's new in v1.2.1: compact 2x2 cards in the PSWloader style
 $news = @(
-  @([char]0xE9D9, 'PSWloader Dashboard', 'Overview, health check and tools in one place.'),
-  @([char]0xE90F, 'Self check and troubleshooting', 'Finds problems and can fix them (experimental).'),
-  @([char]0xE702, 'Native Bluetooth', 'Connect Bluetooth devices.'),
-  @([char]0xE701, 'More stable Wi-Fi, disks and GPU', 'Fixes in the Wi-Fi, NVMe and GPU drivers.'),
-  @([char]0xE7F4, 'HDMI hotplug and resolutions', 'Picture back after replug or display off.'),
-  @([char]0xEDA2, 'USB and NVMe boot fixes', 'Reliable starts from USB and M.2 SSDs.'),
-  @([char]0xE7FC, 'Initial PS5 Pro support', 'Windows starts, no GPU driver yet.'),
-  @([char]0xE74F, 'Quieter fan', 'No loud spin-up at start any more.'),
-  @([char]0xE950, 'Video memory fixes', 'More video memory for the GPU by default.'),
-  @([char]0xE72C, 'Boot once', 'Restart straight into another disk.')
+  @([char]0xE9D9, 'Power & Fan Dashboard', 'Manage power presets, fan presets and custom curves live in Windows.'),
+  @([char]0xE74F, 'Quieter Fan Curves', 'Re-tuned curves for noticeably quieter operation under light and gaming loads.'),
+  @([char]0xE950, 'Gaming Stability & Performance', 'Higher default VRAM, improved memory handling and full boost clocks.'),
+  @([char]0xE701, 'Broader Wireless Support', 'Generic Wi-Fi and Bluetooth support across PS5 revisions with faster Wi-Fi.')
 )
 $cards = ($news | ForEach-Object {   # v1.5: no icons - a thin PSWloader-blue bar on the left of each card
   @"
